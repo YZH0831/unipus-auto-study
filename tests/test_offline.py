@@ -291,6 +291,28 @@ def t_llm_parse():
     assert LLMClient._parse("ANSWER: B") == "B"
 
 
+def t_openq_no_answer_literal():
+    """回归：开放式问答题输入框绝不能被写死成 'answer'。
+
+    用户多次投诉 Step 2 网页上显示 ANSWER。根因不是大模型，而是
+    JS_FILL 兜底里 el.value = 'answer'。这里钉死该字面量不再出现，
+    并确认开放式问答专用处理器已接入。
+    """
+    import tools.study_ai as S
+
+    assert "el.value = 'answer'" not in S.JS_FILL, \
+        "兜底 JS 又写死 answer 了——网页会显示 ANSWER"
+    assert "el.value = \"answer\"" not in S.JS_FILL, \
+        "兜底 JS 又写死 answer 了（双引号）"
+    assert hasattr(S, "JS_OPENQ_SCAN") and hasattr(S, "JS_OPENQ_FILL"), \
+        "开放式问答题扫描/填充器缺失"
+    assert callable(getattr(S, "_answer_open_questions", None)), \
+        "开放式问答题作答处理器缺失"
+    # 扫描器必须能命中真实页面的 textarea 题块选择器
+    assert "question-common-abs-reply" in S.JS_OPENQ_SCAN, \
+        "openq 扫描器未覆盖 Group discussion Step 2 的题块 class"
+
+
 # ---------------------------------------------------------------- 页面规则
 def t_page_rules_defaults():
     import upc.page_rules as R
@@ -475,6 +497,7 @@ def main():
     print("\n[工具]")
     check("日志脱敏", t_mask)
     check("大模型输出解析", t_llm_parse)
+    check("开放式问答不写死answer", t_openq_no_answer_literal)
     check("选择器无重复", t_selector_no_dupes)
 
     print("\n" + "=" * 60)

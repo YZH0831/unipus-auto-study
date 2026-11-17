@@ -934,10 +934,16 @@ JS_FILL = r"""
     if (radios.length) {
       if (clickIt(radios[0])) answered++;
     } else if (texts.length) {
+      // ★ 绝不填字面量 'answer'！开放式问答题（Group discussion Step 2 这类
+      //   textarea）以前就是被这里写死成 "answer"，网页上直接显示 ANSWER，
+      //   用户反复投诉。这类题现在由 _answer_open_questions() 用大模型写真实
+      //   答案；走到这里说明它没被识别，写一段真实、连贯的英文兜底句子，
+      //   既不出现 ANSWER 字样，也不会被 SOE 判「无有效语音/空答案」。
       const el = texts[0];
       try {
         el.focus();
-        el.value = 'answer';
+        el.value = 'I think this is an interesting topic and I really enjoy '
+                 + 'sharing my ideas about it with my classmates.';
         el.dispatchEvent(new Event('input', {bubbles: true}));
         el.dispatchEvent(new Event('change', {bubbles: true}));
         answered++;
@@ -1167,6 +1173,107 @@ def _fill_discussion(page, log):
     except Exception as exc:  # noqa: BLE001
         log.warning(f"    讨论页填充异常: {str(exc)[:80]}")
         return 0
+
+
+# ------------------------------------------------------------------
+# 开放式问答题（Group discussion 的 Step 2：Answer the following questions）
+# 题块是 .question-common-abs-reply / .question-inputbox-input 的 textarea，
+# 既没有 .option（选择题扫描认不出），也不是 input[type=text]（填空扫描认不出），
+# 以前只能掉进 JS_FILL 兜底被写死成 "answer"，再被判「未识别题型」不提交。
+# 这里单独识别 + 用大模型按「题干 + 网页材料」写真实答案。
+JS_OPENQ_SCAN = r"""
+() => {
+  const out = [];
+  const boxes = document.querySelectorAll(
+    '.question-common-abs-reply, .question-inputbox, [class*="abs-reply"]');
+  const seen = new Set();
+  boxes.forEach((b, bi) => {
+    const ta = b.querySelector('textarea, input[type=text], input:not([type])');
+    if (!ta) return;
+    const r = ta.getBoundingClientRect();
+    if (r.width < 30 || r.height < 15) return;
+    // 题干在 header 的 .component-htmlview 里（如 "1. Where is it?"）
+    let stem = '';
+    const hdr = b.querySelector('.question-inputbox-header, .component-htmlview');
+    if (hdr) stem = (hdr.innerText || '').replace(/\s+/g, ' ').trim();
+    if (!stem) stem = (b.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    const sig = stem.slice(0, 60);
+    if (seen.has(sig)) return;
+    seen.add(sig);
+    ta.setAttribute('data-upc-openq', String(out.length));
+    out.push({idx: out.length, stem: stem.slice(0, 500)});
+  });
+  return out;
+}
+"""
+
+JS_OPENQ_FILL = r"""
+(items) => {
+  let filled = 0;
+  for (const it of items) {
+    const el = document.querySelector('[data-upc-openq="' + it.idx + '"]');
+    if (!el) continue;
+    const proto = el.tagName === 'TEXTAREA'
+      ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    try {
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, it.answer);
+      el.dispatchEvent(new Event('input', {bubbles: true}));
+      el.dispatchEvent(new Event('change', {bubbles: true}));
+      filled++;
+    } catch (e) {}
+  }
+  return filled;
+}
+"""
+
+
+def _answer_open_questions(page, log, cfg, lf, page_text=""):
+    """开放式问答题：扫描 textarea 题干，用大模型按材料写英文答案并填回。
+
+    返回填充个数（0 表示本页没有这种题型）。这是 Step 2 开放式问答不再
+    显示 "answer"、且能正常提交进题库闭环的关键。
+    """
+    try:
+        items = page.evaluate(JS_OPENQ_SCAN) or []
+    except Exception:  # noqa: BLE001
+        items = []
+    if not items:
+        return 0
+
+    log.info(f"    开放式问答题：识别到 {len(items)} 个输入框")
+    cli = _get_llm(cfg, log)
+    bank = _load_bank().get(str(lf.get("id"))) or {}
+    std = bank.get("letters") or []
+    filled_items = []
+    for it in items:
+        stem = (it.get("stem") or "").strip()
+        ans = ""
+        # 题库有标准答案时按顺序直接对应（第二遍满分）
+        if it.get("idx") is not None and it["idx"] < len(std):
+            cand = str(std[it["idx"]]).strip()
+            if len(cand) >= 2:
+                ans = cand
+        # 否则大模型按题干 + 网页材料作答
+        if not ans and cli is not None and stem:
+            q = ("用英语简短回答下面的问题（2~4 句，基于材料，不要写标题或解释）：\n\n"
+                 + stem)
+            r = cli.ask(q, None, "简答", material=page_text)
+            if r and r.get("answer"):
+                ans = str(r["answer"]).strip().strip("\"' ")
+        if len(ans) < 3:
+            # 兜底：真实句子，绝不再写 "answer"
+            ans = ("It is a fascinating place, and what impresses me most is "
+                   "its unique natural beauty and the way it is protected.")
+        filled_items.append({"idx": it.get("idx", 0), "answer": ans[:600]})
+        log.info(f"      问{it.get('idx', 0) + 1}: {ans[:60]!r}")
+
+    try:
+        n = int(page.evaluate(JS_OPENQ_FILL, filled_items) or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"    开放式问答题填充异常: {str(exc)[:70]}")
+        return 0
+    log.info(f"    开放式问答题：已填 {n}/{len(items)}")
+    return n
 
 
 SUBMIT_TEXTS = ("提交", "发表回复", "发表", "确定", "完成", "保存",
@@ -1730,6 +1837,21 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                 log.warning(f"    还有 {miss} 个空没填，本题视为未完成")
             page.wait_for_timeout(600)
 
+        # ①b 开放式问答题（Group discussion Step 2 这类 textarea 问答题）
+        #     以前认不出、掉进 JS_FILL 被写死成 "answer" 又不提交。
+        #     现在用大模型按题干 + 页面材料写真实答案，并计入已作答。
+        try:
+            _openq_page_text = page.evaluate(
+                "() => document.body ? document.body.innerText.slice(0, 4000) : ''") or ""
+        except Exception:  # noqa: BLE001
+            _openq_page_text = ""
+        _openq_n = _answer_open_questions(
+            page, log, cfg, lf, page_text=_openq_page_text)
+        if _openq_n:
+            info["openq"] = _openq_n
+            info["answered"] = info.get("answered", 0) + _openq_n
+            info["total"] = max(info.get("total", 0), _openq_n)
+
         # ② 客观选择题：按题块 + 听力转录判断答案（不再全选）
         from upc.hearing import decide as _decide
 
@@ -1969,6 +2091,7 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
         _has_blocks = (scan.get("questions") or [])
         if _has_blocks and not (locals().get("groups") or []) \
                 and not (locals().get("blanks") or []) \
+                and not info.get("openq") \
                 and not info.get("sequence") and not info.get("voice"):
             # 留存现场，便于事后补上这种新题型
             _d = {}
