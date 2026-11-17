@@ -116,8 +116,18 @@ def check_config():
             "至少填一个，否则程序不知道要学哪门课")
 
     add(INFO, f"时长模式: {cfg.duration.mode} | total_minutes={cfg.duration.total_minutes}")
+    # 大模型是否可用要看「配置开关 + 实际 key」。
+    # key 允许留空、由 DPAPI 加密存在 state/.llm_key.dpapi，
+    # 直接看 cfg.quiz.llm.api_key 会误报「未启用」（明明刷题时能用）。
+    # 这里和运行时 LLMClient.available 用同一套判断，避免误导。
+    try:
+        import logging
+        from upc.llm import LLMClient
+        _llm_ok = LLMClient(cfg, logging.getLogger("doctor")).available
+    except Exception:  # noqa: BLE001
+        _llm_ok = bool(cfg.quiz.llm.enabled and cfg.quiz.llm.api_key)
     add(INFO, f"答题策略: {cfg.quiz.strategy} | 大模型: "
-              f"{'启用' if cfg.quiz.llm.enabled and cfg.quiz.llm.api_key else '未启用'}")
+              f"{'启用' if _llm_ok else '未启用'}")
     add(INFO, f"口语模块: {'启用' if cfg.speaking.enabled else '关闭'}")
     add(INFO, f"浏览器模式: {cfg.browser.mode} | headless={cfg.browser.headless}")
 
