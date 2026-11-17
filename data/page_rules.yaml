@@ -1,0 +1,39 @@
+# U校园 页面知识 + 运行策略
+#
+# 借鉴 GitHub 上 auto-online-course-agent-skill 的「页面知识是一等资产」：
+# 平台改版、新增提示语、想调失败策略时只改本文件，不动业务代码。
+# 本文件缺失或损坏时，upc/page_rules.py 会自动回退到内置默认值。
+
+version: 1
+
+# 页面正文出现这些词（先去空白、转小写再匹配）= 平台明确说 PC 端做不了。
+# 直接跳过：不提交、不标记已看、不停留计时、不回退重放整节。
+pc_unsupported_marks:
+  - "该题型暂不支持pc端"
+  - "暂不支持pc端"
+  - "不支持pc端"
+  - "请在app端查看"
+
+# Role-play 点完 A/B 仍停在 Step 1 选角页（页面只有「上一题」，进不了 Step 2）。
+# 只在「题目完全没识别出来」时才用这组规则判定；能正常进 Step 2 跟读的
+# 会先被 _handle_roleplay 接走，不会走到这里，所以不会误伤。
+roleplay_stuck_marks:
+  - "choosearole"
+  - "nowit'syourturntorole-play"
+
+# 断点续跑：本地记住「PC 端不支持」的叶子，下次连页面都不用打开。
+# 只缓存这一类，其它状态仍以平台 pass 为准，避免本地缓存导致漏刷。
+resume:
+  enabled: true
+  ttl_days: 7            # 平台可能改版，缓存不能永久有效
+  path: "state/progress.json"
+
+# 页面打开失败策略：
+#   goto_retries            单个叶子打开失败重试几次（退避递增）
+#   max_consecutive_failures 连续这么多叶子都打不开 → 判定登录态失效/白屏空转，提前结束
+# 借鉴 Aegink/chaoxing 的 3 次熔断、xuexitongScript 的防死循环、
+# Autovisor 的「避免白屏空转」。
+navigation:
+  goto_retries: 2
+  backoff_ms: 1500
+  max_consecutive_failures: 3

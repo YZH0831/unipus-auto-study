@@ -1,0 +1,150 @@
+# ============================================================
+#  U校园自动化助手 配置文件
+#  只改你要改的部分，其余用默认值即可（默认值见 upc/config.py）
+# ============================================================
+
+account:
+  # U校园统一登录账号（手机号 / 邮箱 / 用户名）
+  # login_method=manual 时可以不填，程序会让你在浏览器里手动登录
+  username: ""
+  password: ""
+
+  # manual   = 打开浏览器，你手动登录一次（推荐，最稳）
+  # password = 用上面的账号密码自动填表（有验证码时仍需手动完成）
+  login_method: manual
+
+
+course:
+  # ★ 最省事的用法：把课程学习页地址整个粘进来
+  #   浏览器打开你的课程 → 复制地址栏 → 粘到下面
+  #   形如：https://ucontent.unipus.cn/#/course/xxxxxxxx
+  url: ""
+
+  # 不填 url 时才会用：按课程名关键词在"我的课程"里找
+  name_contains: ""
+
+  # 只学指定单元：书上 Unit 1~8 就写 "1-3,5"；留空 = 全部
+  units: ""
+
+  # 运行时在控制台勾选单元（等价于 --pick）
+  pick_interactively: false
+
+
+duration:
+  # total     ：把 total_minutes 平均分给所有 目录×Tab×Task（推荐）
+  # per_item  ：每个 Task 固定停 per_item_seconds 秒
+  # remaining ：读平台显示的"还需学习 X 分钟"，逐个单元刷到满足
+  mode: total
+
+  # 本次运行总共要刷多少分钟（所有单元加起来）
+  total_minutes: 60
+
+  # mode=per_item 时每个 Task 停多久
+  per_item_seconds: 90
+
+  # 每个 Task 至少停够多少秒（均分太碎时兜底，太短会被判无效）
+  min_per_item_s: 10
+
+  # total 模式下抽样几个目录项来估算 Tab/Task 数量（0=全量探测，很慢）
+  probe_samples: 3
+
+  # 视频播放期间是否暂停计时（U校园把视频时长和学习时长分开算，建议 true）
+  pause_on_video: true
+
+  # 计时期间的动作频率
+  activity_move_every_s: 45
+  activity_scroll_every_s: 120
+
+
+video:
+  enabled: true
+  # 平台可能会检测倍速。不确定就先保持 1.0，稳一点
+  speed: 1.0
+  # 等视频播完再走（false = 播起来就继续，快但可能不算时长）
+  wait_end: true
+  timeout_per_video_min: 60
+  mute: true
+
+
+quiz:
+  enabled: true
+
+  # sniff  ：试答→嗅探接口返回的正确答案→回填重答（无需题库，命中率高，会消耗一次作答）
+  # cache  ：只用本地题库，从不试答（最保守）
+  # llm    ：直接调大模型作答
+  # hybrid ：cache → llm → 兜底（实测最实用，不消耗作答次数）
+  strategy: hybrid
+
+  # 交卷后把答案沉淀到 data/answers.json，下次同样的题直接命中
+  two_pass: true
+
+  # 0 = 不限
+  max_questions: 0
+
+  llm:
+    enabled: false
+    base_url: "https://api.deepseek.com/v1"
+    api_key: ""
+    model: "deepseek-chat"
+    timeout_s: 30
+    max_calls: 200
+
+  tiku:
+    enabled: false
+    providers: []
+    # providers:
+    #   - {type: "icodef", token: "你的token"}
+    #   - {type: "tikuadapter", url: "http://127.0.0.1:8060"}
+
+
+speaking:
+  # 口语跟读/录音。默认关闭——这类题平台会语音识别打分，伪造录音基本拿不到分，
+  # 打开只能保证"流程走完、任务点标记完成"。
+  enabled: false
+  record_seconds: 6
+  max_items: 20
+  submit: true
+
+
+browser:
+  # auto / msedge / chrome / chromium
+  channel: auto
+  # 刷时长必须保持窗口可见，平台可能按页面可见性判断
+  headless: false
+
+  # launch = 程序自己开浏览器；attach = 接管你已登录的浏览器
+  mode: launch
+  cdp_url: "http://127.0.0.1:9222"
+
+  # 伪麦克风：口语题需要。开启后不会再被"请允许录音"卡住
+  fake_media: true
+  # 可选：指定 wav 让虚拟麦克风"说话"（跟读题能拿到有声音的输入）
+  fake_audio_wav: ""
+
+
+login:
+  reuse_state: true       # 有登录态就先复用
+  manual_wait_s: 300      # 手动登录最长等多久
+  auto_relogin: true      # 掉线自动重登
+  check_interval_s: 90    # 多久探测一次会话
+
+
+humanize:
+  enabled: true
+  long_pause_every: 6     # 每 6 个 Task 插入一次长暂停
+
+
+safety:
+  max_runtime_min: 0      # 单次最长运行分钟，0=不限
+  max_items: 0            # 单次最多处理几项，0=不限
+  min_task_interval_s: 3  # 两个 Task 之间的最小间隔
+  retry_rounds: 1         # 失败的项在末尾重试几轮
+  stop_on_risk: false     # 遇风控页是否直接停（false=等你手动过验证）
+
+
+popup:
+  auto_close: true
+  check_interval_s: 5
+
+
+log_level: INFO

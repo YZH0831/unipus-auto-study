@@ -1,0 +1,34 @@
+# ---- 虚拟环境与缓存 ----
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 个人数据：绝不提交 ----
+config.yaml
+config.yaml.bak
+# state/ 下含登录态、会话 cookie、进度、UI 浏览器资料（ui_profile/ 里有 Cookies），
+# 因此整目录排除，只保留一个占位文件。
+state/*
+!state/.gitkeep
+# 题库/字幕/音频索引属于个人积累的学习数据与课程资源，参照学习通仓库约定不入库
+data/answers.json
+data/answer_bank.json
+data/audio_index.json
+data/transcripts.json
+data/question_pool.json
+data/audio_cache/
+logs/
+output/
+dist/
+*.log
+
+# ---- 保留空目录 ----
+!data/.gitkeep
+
+# ---- 编辑器 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

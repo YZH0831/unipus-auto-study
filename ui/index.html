@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>U校园自动化助手 · 控制面板</title>
+<style>
+:root{
+  --bg:#070c18; --panel:rgba(19,27,47,.74); --panel-2:rgba(24,33,56,.6);
+  --line:rgba(255,255,255,.085); --line-2:rgba(255,255,255,.14);
+  --txt:#e9eefb; --muted:#8b98b5; --dim:#5f6c88;
+  --a1:#6f8cff; --a2:#8b6dff; --a3:#35d6c3;
+  --ok:#43d9a3; --warn:#ffb454; --danger:#ff6b7a;
+  --radius:18px;
+  --font:"Segoe UI","Microsoft YaHei","PingFang SC",system-ui,-apple-system,sans-serif;
+  --mono:"Cascadia Code",Consolas,"SF Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;min-height:100%}
+body{
+  background:var(--bg); color:var(--txt); font-family:var(--font);
+  font-size:14px; line-height:1.55; overflow-x:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+body::before,body::after{
+  content:""; position:fixed; z-index:-1; pointer-events:none; border-radius:50%;
+  filter:blur(90px); opacity:.5;
+}
+body::before{width:620px;height:620px;top:-260px;left:-140px;
+  background:radial-gradient(circle,#3a3f9e 0%,transparent 70%)}
+body::after{width:560px;height:560px;bottom:-280px;right:-120px;
+  background:radial-gradient(circle,#0e6f76 0%,transparent 70%)}
+
+.app{max-width:1420px;margin:0 auto;padding:26px 28px 48px}
+header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:24px}
+.brand{display:flex;align-items:center;gap:13px;min-width:0}
+.logo{
+  width:44px;height:44px;border-radius:14px;flex:none;
+  background:linear-gradient(140deg,var(--a1),var(--a2));
+  display:grid;place-items:center;
+  box-shadow:0 8px 26px rgba(110,120,255,.34),inset 0 1px 0 rgba(255,255,255,.22);
+}
+.logo svg{width:24px;height:24px}
+.brand h1{margin:0;font-size:19px;font-weight:650;letter-spacing:.2px;white-space:nowrap}
+.brand .sub{color:var(--muted);font-size:12px;margin-top:1px}
+.ver{font-family:var(--mono);font-size:11px;color:var(--dim);
+  border:1px solid var(--line);padding:2px 8px;border-radius:20px;margin-left:4px}
+.spacer{flex:1}
+.pill{
+  display:inline-flex;align-items:center;gap:9px;padding:8px 15px;border-radius:30px;
+  background:var(--panel);border:1px solid var(--line);font-size:12.5px;color:var(--muted);
+  white-space:nowrap;
+}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
+.pill.on{color:var(--txt);border-color:rgba(67,217,163,.32)}
+.pill.on .dot{background:var(--ok);box-shadow:0 0 0 4px rgba(67,217,163,.15);
+  animation:pulse 1.8s ease-in-out infinite}
+.pill.off .dot{background:#6a7692}
+.pill.err .dot{background:var(--danger)}
+@keyframes pulse{50%{box-shadow:0 0 0 8px rgba(67,217,163,0)}}
+
+.tabs{display:flex;gap:4px;padding:4px;border-radius:13px;
+  background:var(--panel);border:1px solid var(--line)}
+.tab{border:0;background:transparent;color:var(--muted);font:inherit;font-size:13px;
+  padding:7px 17px;border-radius:10px;cursor:pointer;transition:.2s}
+.tab:hover{color:var(--txt)}
+.tab.active{color:#fff;background:linear-gradient(135deg,rgba(111,140,255,.9),rgba(139,109,255,.85));
+  box-shadow:0 4px 16px rgba(111,140,255,.28)}
+
+.view{display:none;animation:fade .35s ease}
+.view.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.grid{display:grid;grid-template-columns:minmax(360px,.88fr) minmax(0,1.12fr);gap:18px}
+.col{display:flex;flex-direction:column;gap:18px;min-width:0}
+.card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:22px;backdrop-filter:blur(16px);
+  box-shadow:0 16px 44px rgba(0,0,0,.24),inset 0 1px 0 rgba(255,255,255,.035);
+  transition:border-color .25s,transform .25s;
+}
+.card:hover{border-color:var(--line-2)}
+.card h2{margin:0 0 4px;font-size:15px;font-weight:640;letter-spacing:.2px;
+  display:flex;align-items:center;gap:9px}
+.card .desc{color:var(--muted);font-size:12.5px;margin:0 0 18px}
+.card h2 .tag{font:11px var(--mono);color:var(--a3);font-weight:400;
+  border:1px solid rgba(53,214,195,.25);padding:2px 8px;border-radius:20px}
+
+.hero{
+  background:linear-gradient(150deg,rgba(42,52,92,.78),rgba(22,29,52,.82));
+  border-color:rgba(125,145,255,.2);position:relative;overflow:hidden;
+}
+.hero::after{content:"";position:absolute;width:260px;height:260px;right:-90px;top:-130px;
+  background:radial-gradient(circle,rgba(111,140,255,.28),transparent 68%);pointer-events:none}
+.bigbtn{
+  position:relative;width:100%;height:60px;border:0;border-radius:14px;cursor:pointer;
+  color:#fff;font:600 16px var(--font);letter-spacing:.6px;
+  background:linear-gradient(105deg,var(--a1),var(--a2));
+  box-shadow:0 12px 30px rgba(111,140,255,.32),inset 0 1px 0 rgba(255,255,255,.25);
+  transition:.22s;display:flex;align-items:center;justify-content:center;gap:10px;
+}
+.bigbtn:hover{transform:translateY(-2px);box-shadow:0 16px 38px rgba(111,140,255,.42)}
+.bigbtn:active{transform:translateY(0)}
+.bigbtn.stop{background:linear-gradient(105deg,#e8556d,#ff7a5c);
+  box-shadow:0 12px 30px rgba(232,85,109,.3)}
+.bigbtn svg{width:19px;height:19px}
+.bigbtn:disabled{opacity:.55;cursor:wait;transform:none}
+.hintline{margin-top:13px;color:var(--muted);font-size:12px;display:flex;
+  justify-content:space-between;gap:12px;flex-wrap:wrap}
+.hintline code{font-family:var(--mono);color:var(--a3);font-size:11.5px}
+
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.field label{font-size:12px;color:var(--muted)}
+.field input,.field select{
+  width:100%;height:38px;padding:0 11px;border-radius:10px;color:var(--txt);
+  background:rgba(9,14,28,.62);border:1px solid var(--line);font:inherit;font-size:13px;
+  outline:none;transition:.2s;
+}
+.field input:focus,.field select:focus{border-color:rgba(111,140,255,.65);
+  box-shadow:0 0 0 3px rgba(111,140,255,.12)}
+.field input::placeholder{color:var(--dim)}
+.field .wide{grid-column:1/-1}
+.switch{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;
+  font-size:12.5px;color:var(--muted);margin-top:4px}
+.switch input{display:none}
+.track{width:38px;height:22px;border-radius:20px;background:#33405f;position:relative;
+  transition:.25s;flex:none;border:1px solid var(--line)}
+.track::after{content:"";position:absolute;width:16px;height:16px;top:2px;left:2px;
+  border-radius:50%;background:#aeb9d2;transition:.25s}
+.switch input:checked+.track{background:linear-gradient(120deg,var(--a1),var(--a2))}
+.switch input:checked+.track::after{left:18px;background:#fff}
+
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.stat{background:var(--panel-2);border:1px solid var(--line);border-radius:13px;
+  padding:14px 12px;min-width:0}
+.stat .k{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat .v{font:600 24px/1.25 var(--mono);margin-top:6px;letter-spacing:-.5px}
+.stat .v small{font-size:11px;color:var(--muted);font-weight:400;margin-left:3px}
+.stat.c1 .v{color:var(--a3)} .stat.c2 .v{color:var(--ok)}
+.stat.c3 .v{color:var(--warn)} .stat.c4 .v{color:#b9a6ff}
+
+.termhead{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.termhead h2{margin:0;flex:1}
+.filename{font:11px var(--mono);color:var(--dim);max-width:230px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.term{
+  height:430px;overflow:auto;border-radius:12px;padding:14px 16px;
+  background:rgba(5,9,20,.72);border:1px solid var(--line);
+  font:12px/1.75 var(--mono);color:#b9c6e2;
+}
+.term::-webkit-scrollbar{width:9px}
+.term::-webkit-scrollbar-thumb{background:#2c3a5c;border-radius:8px}
+.term .ln{white-space:pre-wrap;word-break:break-all;padding:1px 0}
+.term .ln.warn{color:var(--warn)} .term .ln.err{color:var(--danger)}
+.term .ln.ok{color:var(--ok)} .term .ln.debug{color:#63728f}
+.term .ln .lv{display:inline-block;min-width:62px;color:inherit;opacity:.85}
+.mini{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--muted)}
+.mini button{background:transparent;border:1px solid var(--line);color:var(--muted);
+  border-radius:8px;padding:3px 9px;font:inherit;font-size:11px;cursor:pointer}
+.mini button:hover{color:var(--txt);border-color:var(--line-2)}
+
+.bar{display:flex;align-items:center;gap:12px;margin:9px 0}
+.bar .name{width:150px;font-size:12.5px;color:var(--muted);flex:none}
+.bar .trackbar{height:8px;border-radius:8px;background:rgba(255,255,255,.06);flex:1;overflow:hidden}
+.bar .fill{height:100%;border-radius:8px;background:linear-gradient(90deg,var(--a1),var(--a3));
+  transition:width .5s}
+.bar .num{width:52px;text-align:right;font:12px var(--mono);color:var(--txt)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:500;font-size:11.5px}
+td{color:var(--txt)} td.mono{font-family:var(--mono);color:var(--muted);font-size:11.5px}
+.badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;
+  background:rgba(111,140,255,.14);color:#a9bcff}
+.badge.g{background:rgba(67,217,163,.13);color:var(--ok)}
+.badge.y{background:rgba(255,180,84,.13);color:var(--warn)}
+.empty{color:var(--dim);text-align:center;padding:36px 0;font-size:13px}
+
+.rulegrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.rulegrid .field input{font-family:var(--mono)}
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+.chip{font:11.5px var(--mono);color:var(--a3);background:rgba(53,214,195,.08);
+  border:1px solid rgba(53,214,195,.2);padding:4px 10px;border-radius:8px}
+.chip.alt{color:#c0aaff;background:rgba(139,109,255,.08);
+  border-color:rgba(139,109,255,.22)}
+.foot{display:flex;align-items:center;gap:12px;margin-top:20px;flex-wrap:wrap}
+.btn2{border:1px solid var(--line-2);background:rgba(111,140,255,.1);color:#cfd9ff;
+  font:inherit;font-size:13px;padding:9px 20px;border-radius:11px;cursor:pointer;transition:.2s}
+.btn2:hover{background:rgba(111,140,255,.2);border-color:rgba(111,140,255,.5)}
+.foot .note{font-size:11.5px;color:var(--dim)}
+
+.toast{position:fixed;left:50%;bottom:28px;transform:translate(-50%,18px);
+  background:rgba(24,33,56,.96);border:1px solid var(--line-2);color:var(--txt);
+  padding:11px 20px;border-radius:12px;font-size:13px;opacity:0;pointer-events:none;
+  transition:.28s;box-shadow:0 14px 36px rgba(0,0,0,.4);z-index:99;max-width:80vw}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.toast.good{border-color:rgba(67,217,163,.45)}
+.toast.bad{border-color:rgba(255,107,122,.5)}
+.conn{font-size:11.5px;color:var(--danger)}
+
+@media(max-width:1000px){
+  .grid{grid-template-columns:1fr}
+  .term{height:340px}
+  .app{padding:20px 16px 36px}
+  header{gap:10px}
+  .spacer{display:none}
+}
+@media(max-width:560px){
+  .stats{grid-template-columns:1fr 1fr}
+  .fields,.rulegrid{grid-template-columns:1fr}
+  .tabs{width:100%} .tab{flex:1;padding:7px 8px;font-size:12px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v16H6.5A2.5 2.5 0 0 0 4 21.5z"/>
+          <path d="M8 7.5h7M8 11h5"/>
+          <circle cx="17.5" cy="16.5" r="3.2" fill="rgba(255,255,255,.18)"/>
+        </svg>
+      </div>
+      <div>
+        <h1>U校园自动化助手 <span class="ver" id="ver">v1.0.0</span></h1>
+        <div class="sub">真实浏览器学习 · 自动答题 · 断点续跑</div>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="pill off" id="pill"><span class="dot"></span><span id="pillText">待机</span></div>
+    <nav class="tabs">
+      <button class="tab active" data-view="console">控制台</button>
+      <button class="tab" data-view="report">报告</button>
+      <button class="tab" data-view="settings">设置</button>
+    </nav>
+  </header>
+
+  <!-- ================= 控制台 ================= -->
+  <section class="view active" id="view-console">
+    <div class="grid">
+      <div class="col">
+        <div class="card hero">
+          <h2>开始一轮刷课 <span class="tag">AI 版</span></h2>
+          <p class="desc">真实播放课件、自动答题，第一遍摸标准答案，第二遍按题库补满分。运行期间别关浏览器窗口。</p>
+          <button class="bigbtn" id="btnMain">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <span id="btnMainText">开始刷课</span>
+          </button>
+          <div class="hintline">
+            <span id="runInfo">当前没有任务在跑</span>
+            <code id="cmdPreview">--minutes 60 --passes 2</code>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>本轮参数</h2>
+          <p class="desc">改动会记住，下次打开自动带出来。</p>
+          <div class="fields">
+            <div class="field"><label>时长（分钟）</label>
+              <input id="fMinutes" type="number" min="1" max="600" value="60"></div>
+            <div class="field"><label>跑几遍</label>
+              <select id="fPasses"><option value="1">1 遍（不补满分）</option>
+                <option value="2" selected>2 遍（推荐）</option><option value="3">3 遍</option></select></div>
+            <div class="field"><label>教材</label>
+              <select id="fBook"><option value="vls">视听说</option><option value="rw">读写</option></select></div>
+            <div class="field"><label>Unit（可选）</label>
+              <input id="fUnit" placeholder="如 1-3 或 1,3"></div>
+            <div class="field wide"><label>指定某一节（可选，填序号或名字关键词）</label>
+              <input id="fMicro" placeholder="如 4 或 Listening to China"></div>
+          </div>
+          <label class="switch"><input type="checkbox" id="fRedo"><span class="track"></span>
+            连已完成的节也重做</label>
+        </div>
+
+        <div class="card">
+          <h2>概览</h2>
+          <p class="desc">数据来自本地进度缓存与上次运行报告。</p>
+          <div class="stats">
+            <div class="stat c1"><div class="k">本轮已用</div><div class="v" id="sElapsed">0<small>分</small></div></div>
+            <div class="stat c2"><div class="k">上次蓝圈新增</div><div class="v" id="sBlue">0</div></div>
+            <div class="stat c3"><div class="k">App 端跳过</div><div class="v" id="sSkip">0</div></div>
+            <div class="stat c4"><div class="k">上次处理</div><div class="v" id="sDone">0</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="card">
+          <div class="termhead">
+            <h2>实时日志</h2>
+            <span class="filename" id="logFile">—</span>
+            <div class="mini"><button id="btnScroll">自动滚动：开</button></div>
+          </div>
+          <div class="term" id="term"><div class="ln">正在连接面板服务…</div></div>
+          <div class="hintline"><span id="connMsg">每 1.5 秒刷新 · 敏感信息已打码</span>
+            <span>级别：<span style="color:var(--warn)">警告</span> /
+              <span style="color:var(--danger)">错误</span> /
+              <span style="color:var(--ok)">完成</span></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 报告 ================= -->
+  <section class="view" id="view-report">
+    <div class="grid">
+      <div class="col">
+        <div class="card">
+          <h2>上次运行</h2>
+          <p class="desc">读取 output/study_ai_report.json</p>
+          <div class="stats" style="grid-template-columns:1fr 1fr">
+            <div class="stat c1"><div class="k">用时</div><div class="v" id="rTime">—<small>分</small></div></div>
+            <div class="stat c2"><div class="k">蓝圈新增</div><div class="v" id="rBlue">—</div></div>
+            <div class="stat c3"><div class="k">需 App 端完成</div><div class="v" id="rApp">—</div></div>
+            <div class="stat c4"><div class="k">缓存直接跳过</div><div class="v" id="rCache">—</div></div>
+          </div>
+          <div id="rBars" style="margin-top:20px"></div>
+        </div>
+        <div class="card">
+          <h2>点亮的 micro 节</h2>
+          <p class="desc">本节从白圈变蓝圈的记录。</p>
+          <div id="rMicros" class="empty">暂无数据</div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h2>最近任务点</h2>
+          <p class="desc">按报告顺序展示最后 20 条。</p>
+          <div style="max-height:520px;overflow:auto">
+            <table><thead><tr><th>名称</th><th>状态</th><th>说明</th></tr></thead>
+              <tbody id="rTasks"></tbody></table>
+          </div>
+          <div class="empty" id="rEmpty">还没有运行过，先去控制台跑一轮吧</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 设置 ================= -->
+  <section class="view" id="view-settings">
+    <div class="grid">
+      <div class="col">
+        <div class="card">
+          <h2>运行策略</h2>
+          <p class="desc">写入 data/page_rules.yaml，保留原有注释；下次运行生效。</p>
+          <div class="rulegrid">
+            <div class="field"><label>页面打开重试次数</label><input id="uRetry" type="number" min="0" max="10"></div>
+            <div class="field"><label>退避基数（毫秒）</label><input id="uBackoff" type="number" min="0" max="10000"></div>
+            <div class="field"><label>连续失败熔断阈值</label><input id="uMaxFail" type="number" min="0" max="20"></div>
+            <div class="field"><label>断点缓存有效期（天）</label><input id="uTtl" type="number" min="0" max="90"></div>
+          </div>
+          <label class="switch" style="margin-top:16px"><input type="checkbox" id="uEnabled">
+            <span class="track"></span>启用断点续跑缓存</label>
+          <label class="switch"><input type="checkbox" id="uAuto"><span class="track"></span>
+            打开面板时自动开始刷课（恢复「双击直跑」习惯）</label>
+          <div class="foot">
+            <button class="btn2" id="btnSave">保存设置</button>
+            <span class="note" id="saveNote">只改允许的字段，不碰 config.yaml 和密钥</span>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h2>页面规则词表</h2>
+          <p class="desc">命中即判定「PC 端无法完成」，直接跳过、不计时、不回退重放。要改请编辑 yaml 文件。</p>
+          <div style="font-size:12px;color:var(--muted);margin-top:6px">平台提示语</div>
+          <div class="chips" id="cPc"></div>
+          <div style="font-size:12px;color:var(--muted);margin-top:18px">Role-play 选角页卡住</div>
+          <div class="chips" id="cStuck"></div>
+        </div>
+        <div class="card">
+          <h2>关于</h2>
+          <p class="desc">本面板只监听 127.0.0.1，不上传任何数据，也不读取账号、密钥和登录态。</p>
+          <div class="hintline"><span>关闭面板黑框即可停止服务</span><span>正在跑的刷课不受影响</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  "use strict";
+  const $ = s => document.querySelector(s);
+  const $$ = s => Array.from(document.querySelectorAll(s));
+  let state = null, view = "console", autoScroll = true, formReady = false, busy = false;
+  let toastTimer = null;
+
+  async function api(path, body){
+    const opt = body === undefined ? {} : {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body)
+    };
+    const r = await fetch(path, opt);
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }
+  function toast(msg, good){
+    const t = $("#toast");
+    t.textContent = msg || "完成";
+    t.className = "toast show " + (good === false ? "bad" : good === true ? "good" : "");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(()=>t.className="toast", 3200);
+  }
+  function escText(node, text){ node.textContent = text == null ? "—" : String(text); }
+
+  /* ---------- 视图切换 ---------- */
+  $$(".tab").forEach(b=>b.addEventListener("click", ()=>{
+    view = b.dataset.view;
+    $$(".tab").forEach(x=>x.classList.toggle("active", x===b));
+    $$(".view").forEach(x=>x.classList.toggle("active", x.id==="view-"+view));
+    if(view==="report") loadReport();
+    if(view==="console") refreshLogs();
+  }));
+
+  /* ---------- 状态渲染 ---------- */
+  function renderState(s){
+    state = s;
+    $("#ver").textContent = "v" + (s.version || "1.0.0");
+    const pill = $("#pill");
+    pill.className = "pill " + (s.running ? "on" : (s.last_rc && s.last_rc !== 0 ? "err" : "off"));
+    $("#pillText").textContent = s.running
+      ? "运行中 · PID " + s.pid + " · " + (s.elapsed_min||0) + " 分钟"
+      : (s.last_rc && s.last_rc !== 0 ? "上次异常退出 (rc=" + s.last_rc + ")" : "待机");
+
+    const btn = $("#btnMain");
+    btn.className = "bigbtn" + (s.running ? " stop" : "");
+    $("#btnMainText").textContent = s.running ? "停止任务" : "开始刷课";
+    $("#runInfo").textContent = s.running
+      ? "浏览器窗口正在工作，请勿关闭" : "当前没有任务在跑";
+
+    $("#sElapsed").innerHTML = (s.elapsed_min||0) + "<small>分</small>";
+    const rep = s.report || {};
+    $("#sBlue").textContent = rep.blue_gained ?? 0;
+    $("#sSkip").textContent = (s.progress && s.progress.cached_unsupported) || 0;
+    $("#sDone").textContent = rep.done ?? 0;
+
+    if(!formReady){ fillForm(s.prefs || {}); fillRules(s.rules || {}); formReady = true; }
+    renderChips(s.rules || {});
+    $("#logFile").textContent = s.log_file || "—";
+    $("#connMsg").textContent = "已连接 · 每 1.5 秒刷新 · 敏感信息已打码";
+  }
+
+  function fillForm(p){
+    $("#fMinutes").value = p.minutes ?? 60;
+    $("#fPasses").value = String(p.passes ?? 2);
+    $("#fBook").value = p.book || "vls";
+    $("#fUnit").value = p.unit || "";
+    $("#fMicro").value = p.micro || "";
+    $("#fRedo").checked = !!p.redo;
+    $("#uAuto").checked = !!p.auto_start;
+    updatePreview();
+  }
+  function fillRules(r){
+    $("#uRetry").value = r.goto_retries ?? 2;
+    $("#uBackoff").value = r.backoff_ms ?? 1500;
+    $("#uMaxFail").value = r.max_consecutive_failures ?? 3;
+    $("#uTtl").value = r.ttl_days ?? 7;
+    $("#uEnabled").checked = r.enabled !== false;
+  }
+  function renderChips(r){
+    const mk = (box, list, alt) => {
+      box.innerHTML = "";
+      (list || []).forEach(x=>{
+        const e = document.createElement("span");
+        e.className = "chip" + (alt ? " alt" : "");
+        e.textContent = x; box.appendChild(e);
+      });
+      if(!(list || []).length){ const e=document.createElement("span");
+        e.className="chip"; e.textContent="（空）"; box.appendChild(e); }
+    };
+    mk($("#cPc"), r.pc_marks, false);
+    mk($("#cStuck"), r.stuck_marks, true);
+  }
+
+  function collectForm(){
+    return {
+      minutes: Number($("#fMinutes").value) || 60,
+      passes: Number($("#fPasses").value) || 2,
+      book: $("#fBook").value,
+      unit: $("#fUnit").value.trim(),
+      micro: $("#fMicro").value.trim(),
+      redo: $("#fRedo").checked
+    };
+  }
+  function updatePreview(){
+    const o = collectForm();
+    let s = "--minutes " + o.minutes + " --passes " + o.passes + " --book " + o.book;
+    if(o.unit) s += " --unit " + o.unit;
+    if(o.micro) s += " --micro " + o.micro;
+    if(o.redo) s += " --redo";
+    $("#cmdPreview").textContent = s;
+  }
+  ["#fMinutes","#fPasses","#fBook","#fUnit","#fMicro","#fRedo"].forEach(sel=>{
+    const el=$(sel); el.addEventListener("input",updatePreview); el.addEventListener("change",updatePreview);
+  });
+
+  /* ---------- 日志 ---------- */
+  async function refreshLogs(){
+    try{
+      const d = await api("/api/logs?n=180");
+      const box = $("#term");
+      const stick = autoScroll && (box.scrollTop + box.clientHeight >= box.scrollHeight - 40);
+      box.innerHTML = "";
+      (d.lines || []).forEach(line=>{
+        const div = document.createElement("div");
+        let cls = "ln";
+        if(/\[ERROR\]|错误|失败/.test(line)) cls += " err";
+        else if(/\[WARNING\]|⚠/.test(line)) cls += " warn";
+        else if(/蓝圈|完成|成功|✓/.test(line)) cls += " ok";
+        else if(/\[DEBUG\]/.test(line)) cls += " debug";
+        div.className = cls;
+        div.textContent = line;
+        box.appendChild(div);
+      });
+      if(d.file) $("#logFile").textContent = d.file;
+      if(stick) box.scrollTop = box.scrollHeight;
+    }catch(e){ /* 服务未启动，保持骨架 */ }
+  }
+  $("#btnScroll").addEventListener("click", ()=>{
+    autoScroll = !autoScroll;
+    $("#btnScroll").textContent = "自动滚动：" + (autoScroll ? "开" : "关");
+    if(autoScroll){ const b=$("#term"); b.scrollTop=b.scrollHeight; }
+  });
+
+  /* ---------- 主按钮 ---------- */
+  $("#btnMain").addEventListener("click", async ()=>{
+    if(busy) return; busy = true; $("#btnMain").disabled = true;
+    try{
+      let r;
+      if(state && state.running){
+        r = await api("/api/stop", {});
+      }else{
+        const o = collectForm();
+        await api("/api/prefs", o);
+        r = await api("/api/start", o);
+      }
+      toast(r.msg, r.ok);
+      await refresh();
+      setTimeout(refreshLogs, 400);
+    }catch(e){ toast("操作失败：" + e.message, false); }
+    finally{ busy = false; $("#btnMain").disabled = false; }
+  });
+
+  /* ---------- 设置保存 ---------- */
+  $("#btnSave").addEventListener("click", async ()=>{
+    const body = {
+      goto_retries: Number($("#uRetry").value),
+      backoff_ms: Number($("#uBackoff").value),
+      max_consecutive_failures: Number($("#uMaxFail").value),
+      ttl_days: Number($("#uTtl").value),
+      enabled: $("#uEnabled").checked
+    };
+    try{
+      const a = await api("/api/rules", body);
+      const b = await api("/api/prefs", {auto_start: $("#uAuto").checked});
+      toast(a.ok && b.ok ? "设置已保存" : (a.msg || b.msg || "部分保存失败"), a.ok && b.ok);
+      $("#saveNote").textContent = "保存时间 " + new Date().toLocaleTimeString();
+      await refresh();
+    }catch(e){ toast("保存失败：" + e.message, false); }
+  });
+
+  /* ---------- 报告 ---------- */
+  async function loadReport(){
+    try{
+      const d = await api("/api/report");
+      const has = d && (d.tasks || d.done !== undefined);
+      $("#rEmpty").style.display = has ? "none" : "block";
+      $("#rTime").innerHTML = (d.elapsed_min ?? "—") + "<small>分</small>";
+      $("#rBlue").textContent = d.blue_gained ?? "—";
+      $("#rApp").textContent = (d.unsupported_pc||[]).length ?? "—";
+      $("#rCache").textContent = d.cached_skips ?? "—";
+      const bars = $("#rBars"); bars.innerHTML = "";
+      const dist = {};
+      (d.tasks||[]).forEach(t=>{ const k=t.status||"done"; dist[k]=(dist[k]||0)+1; });
+      const max = Math.max(1, ...Object.values(dist));
+      Object.entries(dist).forEach(([k,v])=>{
+        const row=document.createElement("div"); row.className="bar";
+        const n=document.createElement("div"); n.className="name"; n.textContent=k;
+        const tr=document.createElement("div"); tr.className="trackbar";
+        const fl=document.createElement("div"); fl.className="fill";
+        fl.style.width=(v/max*100)+"%";
+        const num=document.createElement("div"); num.className="num"; num.textContent=v;
+        tr.appendChild(fl); row.append(n,tr,num); bars.appendChild(row);
+      });
+      const ms=$("#rMicros"); ms.innerHTML="";
+      const turned=d.micros_turned||[];
+      if(!turned.length){ ms.className="empty"; ms.textContent="暂无数据"; }
+      else{ ms.className="chips"; turned.forEach(x=>{
+        const e=document.createElement("span"); e.className="chip"; e.textContent=x; ms.appendChild(e); }); }
+      const tb=$("#rTasks"); tb.innerHTML="";
+      (d.tasks||[]).slice(-20).reverse().forEach(t=>{
+        const tr=document.createElement("tr");
+        const a=document.createElement("td"); a.textContent=t.name||"—";
+        const b=document.createElement("td");
+        const sp=document.createElement("span");
+        const st=t.status||"done";
+        sp.className="badge"+(st==="done"?" g":st==="unsupported_pc"?" y":"");
+        sp.textContent=st; b.appendChild(sp);
+        const c=document.createElement("td"); c.className="mono";
+        c.textContent=t.skip_reason||t.micro||"";
+        tr.append(a,b,c); tb.appendChild(tr);
+      });
+    }catch(e){ $("#rEmpty").textContent="报告读取失败：" + e.message; }
+  }
+
+  /* ---------- 轮询 ---------- */
+  async function refresh(){
+    try{ renderState(await api("/api/state")); }
+    catch(e){
+      $("#pill").className="pill err";
+      $("#pillText").textContent="服务未连接";
+      $("#connMsg").innerHTML='<span class="conn">面板服务没启动，请双击桌面「U校园自动化助手」</span>';
+    }
+  }
+  refresh(); refreshLogs();
+  setInterval(refresh, 1500);
+  setInterval(()=>{ if(view==="console") refreshLogs(); }, 1500);
+})();
+</script>
+</body>
+</html>
