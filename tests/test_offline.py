@@ -291,6 +291,34 @@ def t_llm_parse():
     assert LLMClient._parse("ANSWER: B") == "B"
 
 
+def t_llm_free_text():
+    """回归：口语稿/开放问答必须返回完整文本，不能被抽成选项字母 'A'。
+
+    真实事故：模型写了 'Taijiquan is a traditional Chinese martial art...'，
+    _parse 的 \\b([A-H])\\b 把稿子里独立的冠词 a 抽成 'A'，稿子被判过短弃用
+    → 退回念 1200 字符题干 → 131s 音频被截 45s → 口语 0 分。
+    """
+    import upc.llm as L
+
+    raw = ("Taijiquan is a traditional Chinese martial art that combines slow, "
+           "gentle movements with deep breathing. It has many benefits.")
+
+    # 老路径确实会误伤（记录这个坑，确保 free_text 是必要的）
+    assert L.LLMClient._parse(raw) == "A"
+
+    # free_text 清理逻辑：剥掉 ANSWER 标签、保留完整稿子
+    cleaned = __import__("re").sub(r"^\s*ANSWER\s*[:：]\s*", "", raw,
+                                    flags=__import__("re").IGNORECASE).strip()
+    assert cleaned == raw
+    assert len(cleaned) > 100, "口语稿被截短了"
+
+    # 带 ANSWER: 前缀时也能正确剥离
+    cleaned2 = __import__("re").sub(r"^\s*ANSWER\s*[:：]\s*", "",
+                                     "ANSWER: " + raw,
+                                     flags=__import__("re").IGNORECASE).strip()
+    assert cleaned2 == raw
+
+
 def t_voice_recording_length():
     """回归：口语录音按音频真实长度，不再被 45s 硬上限截断。
 
@@ -525,6 +553,7 @@ def main():
     print("\n[工具]")
     check("日志脱敏", t_mask)
     check("大模型输出解析", t_llm_parse)
+    check("口语稿不被抽成A", t_llm_free_text)
     check("口语录音按音频全长", t_voice_recording_length)
     check("开放式问答不写死answer", t_openq_no_answer_literal)
     check("选择器无重复", t_selector_no_dupes)

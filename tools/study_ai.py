@@ -1257,7 +1257,7 @@ def _answer_open_questions(page, log, cfg, lf, page_text=""):
         if not ans and cli is not None and stem:
             q = ("用英语简短回答下面的问题（2~4 句，基于材料，不要写标题或解释）：\n\n"
                  + stem)
-            r = cli.ask(q, None, "简答", material=page_text)
+            r = cli.ask(q, None, "简答", material=page_text, free_text=True)
             if r and r.get("answer"):
                 ans = str(r["answer"]).strip().strip("\"' ")
         if len(ans) < 3:

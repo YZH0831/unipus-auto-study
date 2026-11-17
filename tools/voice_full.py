@@ -156,7 +156,7 @@ def main():
             if _cli.available:
                 _q = ("用英语回答下面这道口语题，要求口语化、自然、80~120 词，"
                       "只输出要说的内容，不要任何解释或标题：\n\n" + seg[:800])
-                _r = _cli.ask(_q, None, "口语作答")
+                _r = _cli.ask(_q, None, "口语作答", free_text=True)
                 if _r and _r.get("answer"):
                     speak_text = str(_r["answer"])
                     print("大模型答案:", speak_text[:160])

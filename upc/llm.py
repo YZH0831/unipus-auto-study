@@ -67,11 +67,14 @@ class LLMClient:
         return bool(self.cfg.enabled and self._key)
 
     def ask(self, stem, options=None, qtype="choice", transcript="",
-            material=""):
+            material="", free_text=False):
         """返回 {'answer': str, 'raw': str} 或 None。
 
         transcript：听力题的音频转录，必须一起给模型，
         否则模型只能瞎猜（之前的 prompt 漏了它，等于让模型蒙答案）。
+        free_text：口语稿/开放式简答用 True——直接返回模型原文，
+        不走 _parse 的「抽 A-H 选项字母」逻辑。否则一段英文稿里的
+        独立冠词 "a" 会被抽成答案 'A'，稿子被判过短弃用（口语 0 分源头）。
         """
         if not self.available:
             return None
@@ -130,7 +133,15 @@ class LLMClient:
 
         # 留原文，方便排查"模型只回了个格式标签"这类问题
         self.log.debug(f"大模型原文: {content[:160]!r}")
-        answer = self._parse(content)
+        if free_text:
+            # 口语稿/开放问答：要完整文本。只剥掉模型照抄的格式标签，
+            # 绝不能抽选项字母——英文稿里到处是独立的 a，会被抽成 'A'。
+            answer = re.sub(r"^\s*ANSWER\s*[:：]\s*", "", content,
+                            flags=re.IGNORECASE).strip()
+            if _is_placeholder(answer):
+                answer = ""
+        else:
+            answer = self._parse(content)
         if not answer:
             self.log.warning(f"没能从模型输出里解析出答案: {content[:120]}")
             return None

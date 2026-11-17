@@ -213,7 +213,7 @@ def _build_speech_text(stem, cfg, log):
             q = ("用英语回答下面这道口语题，口语化、自然、60~100 词，"
                  "只输出要说的内容，不要解释或标题，控制在 45 秒能念完：\n\n"
                  + (stem or "")[:800])
-            r = cli.ask(q, None, "口语作答")
+            r = cli.ask(q, None, "口语作答", free_text=True)
             if r and r.get("answer"):
                 text = str(r["answer"]).strip()
                 # 模型只吐一个格式标签/单词时，TTS 念出来会被 SOE 判
