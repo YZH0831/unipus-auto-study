@@ -133,6 +133,44 @@ def _tts(text, out_mp3, voice="en-US-AriaNeural"):
     return out_mp3 if out_mp3.exists() and out_mp3.stat().st_size > 1000 else None
 
 
+# 多小题口语题：每个录音按钮对应一个小题。以前的 bug 是所有小题共用同一份
+# TTS 音频（同一段话答 N 个不同问题 → 除第 1 个外基本都 0 分）。
+# 这里从每个录音按钮向上找它所属小题的题干，拿得到就逐题作答。
+JS_VOICE_ITEMS = r"""
+() => {
+  const btns = Array.from(document.querySelectorAll('.button-record'));
+  if (btns.length < 2) return [];
+  const out = [];
+  const seen = new Set();
+  // 从按钮往上找「包含问号 / 编号 / 足够长文字」的最近独立文字块
+  const stemOf = (btn) => {
+    let el = btn;
+    for (let up = 0; up < 6 && el; up++) {
+      el = el.parentElement;
+      if (!el) break;
+      let t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+      if (!t || t.length > 600) continue;
+      // 去掉按钮自身文字的干扰
+      if (/^\d{0,2}:?\d{0,2}$/.test(t)) continue;
+      // 题目块通常含 ? 或以 数字./Q 开头
+      if (/[?？]/.test(t) || /^\d+[.)、]/.test(t) || /^(Q|Question)/i.test(t)) {
+        return t.slice(0, 400);
+      }
+    }
+    return '';
+  };
+  btns.forEach((b, i) => {
+    let stem = stemOf(b);
+    if (!stem) return;
+    const sig = stem.slice(0, 50);
+    if (seen.has(sig)) return;   // 同一题被多个按钮命中时只留一次
+    seen.add(sig);
+    out.push({ idx: i, stem: stem });
+  });
+  return out;
+}
+"""
+
 JS_ORIGIN_AUDIO = r"""
 () => {
   const out = [];
@@ -309,29 +347,67 @@ def handle_voice(page, log, cfg, leaf_id, stem, record_seconds=8):
         return ok > 0
 
     # ---------- 自由作答：TTS ----------
-    text = _build_speech_text(stem, cfg, log)
-    if not text:
-        return False
-    if len(text.strip()) < 20:
-        log.warning(f"    口语题：稿子过短（{text[:40]!r}），不录音以免拿 0 分")
-        return False
-    mp3 = ROOT / "output" / f"voice_{key}.mp3"
-    if key in _CACHE and _CACHE[key].exists():
-        mp3 = _CACHE[key]
+    # ★ 多小题口语题必须逐题作答：以前所有录音按钮共用同一份 TTS 音频，
+    #   等于用同一段话回答 N 个不同问题，第 2 小题起基本都 0 分。
+    #   这里先尝试取每个按钮对应的小题题干；取得到就每题各写各的答案。
+    items = []
+    try:
+        items = page.evaluate(JS_VOICE_ITEMS) or []
+    except Exception:  # noqa: BLE001
+        items = []
+    # 只有拿到「多个不同题干」才走逐题作答，否则退回原来的单份稿子
+    per_item = len(items) >= 2 and len(set(i.get("stem", "")[:50] for i in items)) >= 2
+    if per_item:
+        log.info(f"    主观口语题：识别到 {len(items)} 个小题，逐题作答")
+        for it in items:
+            log.info(f"      小题{it.get('idx', 0) + 1} 题干: "
+                     f"{(it.get('stem') or '')[:80]!r}")
     else:
-        got = _tts(text[:1200], mp3)
-        if not got:
-            log.warning("    口语题：TTS 合成失败")
-            return False
-        _CACHE[key] = got
-    b64 = base64.b64encode(mp3.read_bytes()).decode()
+        # 没取到不同题干：记下来，便于下次按真实 DOM 修正选择器
+        log.warning(f"    主观口语题：{total} 个录音按钮但未取到独立题干，"
+                    f"退回单份作答（扫描到 {len(items)} 个候选）。"
+                    f"整题文本前80字: {(stem or '')[:80]!r}")
+        items = [{"idx": i, "stem": stem} for i in range(total)]
 
-    log.info(f"    主观口语题：{total} 个录音按钮，TTS 作答（{len(text)} 字符）")
+    # 为每个小题生成 audio b64（逐题作答时每题不同）
+    per_item_b64 = []
+    for it in items:
+        sub_stem = it.get("stem") or stem
+        suffix = f"_{it.get('idx', 0)}" if per_item else ""
+        mp3 = ROOT / "output" / f"voice_{key}{suffix}.mp3"
+        cache_key = f"{key}{suffix}"
+        if cache_key in _CACHE and _CACHE[cache_key].exists():
+            use_mp3 = _CACHE[cache_key]
+        else:
+            sub_text = _build_speech_text(sub_stem, cfg, log)
+            if not sub_text or len(sub_text.strip()) < 20:
+                # 该题稿子失败：用整题稿兜底，避免空音频
+                sub_text = _build_speech_text(stem, cfg, log) or ""
+            if len(sub_text.strip()) < 20:
+                log.warning("    口语题：稿子过短，不录音以免拿 0 分")
+                continue
+            got = _tts(sub_text[:1200], mp3)
+            if not got:
+                log.warning("    口语题：TTS 合成失败")
+                continue
+            _CACHE[cache_key] = got
+            use_mp3 = got
+        per_item_b64.append((it.get("idx", 0),
+                             base64.b64encode(use_mp3.read_bytes()).decode()))
+
+    if not per_item_b64:
+        return False
+
+    log.info(f"    主观口语题：{total} 个录音按钮，"
+             f"{'逐题' if per_item else '单份'}TTS 作答（{len(per_item_b64)} 段音频）")
     ok = 0
     for idx in range(total):
         cur = page.query_selector_all(".button-record")
         if idx >= len(cur):
             break
+        # 取本题对应的音频；没有专属于它的就用第一段兜底
+        candidates = [b for i, b in per_item_b64 if i == idx]
+        b64 = candidates[0] if candidates else per_item_b64[0][1]
         dur = inject_audio(page, b64)
         if dur <= 0:
             log.warning("    口语题：注入音频失败")
