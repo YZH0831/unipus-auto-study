@@ -1,10 +1,19 @@
 # U校园自动化助手（unipus-auto-study）
 
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-v1.0.0-orange)
+
 > 用 **真实浏览器**（Playwright 驱动本机 Edge）完成 U校园（Unipus）课程的
 > **学习时长、视频/音频、单元测试、口语录音**，带**试答嗅探答题**、
 > **多策略选择器回退**、**环境自检 / DOM 探针 / 密钥图形设置**等工程配套。
 
 当前版本 **v1.0.0**｜平台 Windows 10/11｜许可 MIT
+GitHub 仓库：https://github.com/YZH0831/unipus-auto-study
+
+> **EN** · Automate Unipus (U校园) courses with a real browser (Playwright + Edge):
+> study time, video/audio, unit quizzes and speaking recordings, with AI answering,
+> resume-from-checkpoint and a local control panel. Windows, MIT.
 
 ---
 
