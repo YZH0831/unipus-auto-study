@@ -291,6 +291,34 @@ def t_llm_parse():
     assert LLMClient._parse("ANSWER: B") == "B"
 
 
+def t_voice_recording_length():
+    """回归：口语录音按音频真实长度，不再被 45s 硬上限截断。
+
+    用户问「为什么录音题有的 90+ 有的 0 分」——0 分主因是超长稿只录
+    前 45s，完整度判 0。这里钉死时长函数与稿子截断逻辑。
+    """
+    import upc.voice as V
+
+    # 超长音频（日志实证 131.8s）必须按全长录，不能被截成 45s
+    assert V._speech_rec_seconds(131.8) > 130, \
+        "131s 音频又被 45s 封顶了——完整度判 0 分"
+    # 正常长度：dur + 1.5s 余量
+    assert abs(V._speech_rec_seconds(37.4) - 38.9) < 0.01
+    # 8s 音频但传了 record_seconds=20，取较大者
+    assert V._speech_rec_seconds(8, record_seconds=20) == 20.0
+    # 极端 400s 音频有安全上限，不会无限录
+    assert V._speech_rec_seconds(400) <= 180.0
+
+    # 稿子截断：超长英文稿要截到上限内、且落在句子边界
+    long_text = ("This is a sentence. " * 60).strip()
+    trimmed = V._trim_speech(long_text)
+    assert len(trimmed) <= V._SPEECH_MAX_CHARS, "超长稿没被截断"
+    assert trimmed.endswith(".") or trimmed.endswith("?") or trimmed.endswith("!"), \
+        "截断应落在完整句子边界"
+    # 短稿原样返回
+    assert V._trim_speech("Short answer.") == "Short answer."
+
+
 def t_openq_no_answer_literal():
     """回归：开放式问答题输入框绝不能被写死成 'answer'。
 
@@ -497,6 +525,7 @@ def main():
     print("\n[工具]")
     check("日志脱敏", t_mask)
     check("大模型输出解析", t_llm_parse)
+    check("口语录音按音频全长", t_voice_recording_length)
     check("开放式问答不写死answer", t_openq_no_answer_literal)
     check("选择器无重复", t_selector_no_dupes)
 

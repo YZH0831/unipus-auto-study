@@ -26,6 +26,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 _CACHE = {}
 
+# 口语作答稿的合理长度：edge-tts 约 150 词/分钟，120 词 ≈ 45s。
+# 稿子过长 → 音频过长，以前录音被 45s 硬上限截断 → 完整度极低 → 0 分。
+_SPEECH_MAX_CHARS = 700
+
+
+def _trim_speech(text, max_chars=_SPEECH_MAX_CHARS):
+    """把口语稿截到句子边界，避免超长音频录不完 / 切在半个词上。"""
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    for sep in (". ", "? ", "! ", ".", "?", "!"):
+        p = cut.rfind(sep)
+        if p > max_chars * 0.6:
+            return cut[:p + len(sep)].strip()
+    return cut.rstrip(" ,;:") + "."
+
+
+def _speech_rec_seconds(dur, record_seconds=8):
+    """按音频真实长度决定录多久。
+
+    以前是 min(dur + 1.5, 45.0)，131s 的超长稿只录 45s → 完整度判 0 分
+    （日志实证：11-11/12/13 的 131.8s/133.1s/124.6s 音频全被截成 45s）。
+    现在按 dur 全长录，只留 180s 安全上限防极端卡死；配合 _trim_speech
+    把稿子压到 ~45s，实际不会触到上限。
+    """
+    return min(max(float(record_seconds), float(dur) + 1.5), 180.0)
+
 # 运行时替换麦克风（不需要 add_init_script，页面已加载也能生效）
 JS_PATCH_GUM = r"""
 (b64) => {
@@ -177,13 +205,14 @@ def _build_speech_text(stem, cfg, log):
     low = (stem or "").lower()
     if "aloud" in low or ("read" in low and "sentence" in low):
         log.info("    口语题：跟读 → 直接念题目文本")
-        return stem
+        return _trim_speech(stem)
     try:
         from upc.llm import LLMClient
         cli = LLMClient(cfg, log)
         if cli.available:
-            q = ("用英语回答下面这道口语题，口语化、自然、80~120 词，"
-                 "只输出要说的内容，不要解释或标题：\n\n" + (stem or "")[:800])
+            q = ("用英语回答下面这道口语题，口语化、自然、60~100 词，"
+                 "只输出要说的内容，不要解释或标题，控制在 45 秒能念完：\n\n"
+                 + (stem or "")[:800])
             r = cli.ask(q, None, "口语作答")
             if r and r.get("answer"):
                 text = str(r["answer"]).strip()
@@ -192,12 +221,13 @@ def _build_speech_text(stem, cfg, log):
                 if len(text) < 20:
                     log.warning(f"    口语题：大模型稿子过短（{text[:40]!r}），弃用")
                 else:
+                    text = _trim_speech(text)
                     log.info(f"    口语题：大模型写答案（{len(text)} 字符）")
                     return text
     except Exception as exc:  # noqa: BLE001
         log.debug(f"    口语答案生成失败: {str(exc)[:60]}")
     log.warning("    口语题：大模型不可用，退回念题目文本（分数会很低）")
-    return stem
+    return _trim_speech(stem)
 
 
 def handle_voice(page, log, cfg, leaf_id, stem, record_seconds=8):
@@ -306,10 +336,11 @@ def handle_voice(page, log, cfg, leaf_id, stem, record_seconds=8):
         if dur <= 0:
             log.warning("    口语题：注入音频失败")
             return False
-        # ★ 跟读路径早就改成按音频真实长度录音，这里以前还固定录 8 秒：
-        #   500+ 字符的稿子（约 30~40s）只录进去前 8 秒，完整度极低 → 0 分。
-        #   注入时还会加 0.8s 前置静音，所以留 1.5s 余量刚好。
-        rec_s = max(record_seconds, min(dur + 1.5, 45.0))
+        # ★ 录音时长按音频真实长度来（注入时已加 0.8s 前置静音，留 1.5s 余量）。
+        #   历史踩坑：先固定录 8s（稿子录不完→0 分），后改 min(dur+1.5, 45.0)
+        #   又把 131s 超长稿截成 45s（完整度极低→0 分）。现在稿子会在
+        #   _build_speech_text 里截到 ~45s，录音按 dur 全长走，不再硬封顶。
+        rec_s = _speech_rec_seconds(dur, record_seconds)
         try:
             try:
                 cur[idx].scroll_into_view_if_needed(timeout=3000)
