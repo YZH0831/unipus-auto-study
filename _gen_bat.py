@@ -504,6 +504,10 @@ set "RC=%ERRORLEVEL%"
 goto check
 
 :ui
+rem 启动自检：清掉上次残留的旧刷题进程，保证用最新代码（不动画面板进程）。
+if exist "tools\bat_guard.py" (
+  ".venv\Scripts\python.exe" tools\bat_guard.py
+)
 rem 用 pythonw 起窗口：双击后直接出现面板窗口，不留黑框。
 rem 面板窗口关掉时，后台服务会自己退出，不留野进程。
 if exist ".venv\Scripts\pythonw.exe" (
