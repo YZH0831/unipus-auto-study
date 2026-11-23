@@ -8,13 +8,16 @@
 > **学习时长、视频/音频、单元测试、口语录音**，带 **AI 版两遍满分答题**
 > （交卷后解密判题接口拿标准答案）、**多策略选择器回退**、
 > **环境自检 / DOM 探针 / 密钥图形设置 / 断点续跑**等工程配套。
+> 2026-11-23 安全审计修复：提交成功必须有请求或页面变化证据，未答/未提交不再记 `done`；
+> 修复选择题填充与无 `name` 分组；API 强制 TLS 校验，账号密码改为 DPAPI 加密存储。
 
 当前版本 **v1.1.0**｜平台 Windows 10/11｜许可 MIT
 GitHub 仓库：https://github.com/YZH0831/unipus-auto-study
 
 > **EN** · Automate Unipus (U校园) courses with a real browser (Playwright + Edge):
 > study time, video/audio, unit quizzes and speaking recordings, with AI answering,
-> resume-from-checkpoint and a local control panel. Windows, MIT.
+> resume-from-checkpoint and a local control panel. Hardened submit-state checks,
+> TLS verification and DPAPI-backed credentials. Windows, MIT.
 
 ---
 
@@ -34,11 +37,11 @@ U校园最耗人的不是"学不会"，而是这三件事：
 
 | 模块 | 能力 |
 |---|---|
-| 登录 | 手动登录一次后长期复用登录态；掉线自愈；可选账号密码自动填表 |
+| 登录 | 手动登录一次后长期复用登录态；掉线自愈；账号密码用 DPAPI 加密存本机，不再明文写 `config.yaml` |
 | 目录解析 | Unit → Section → Micro 三层树自动展开识别；多套选择器回退 |
 | 刷时长 | 三种模式：总时长均分 / 单点固定 / 按平台剩余时长补足 |
 | 视频音频 | 自动播放、解锁播放器控制、可选倍速、等播完再走、卡顿自愈 |
-| 单元测试 | 本地题库 → 大模型 → 试答嗅探 → 兜底，**任何情况不留空** |
+| 单元测试 | 本地题库 → 大模型 → 试答嗅探 → 兜底，**任何情况不留空**；答案按传入值填充并读回 DOM 核对，未答/未提交不计完成 |
 | 口语录音 | 伪麦克风走完录音→提交流程（分数看平台，不保证） |
 | 反风控 | 贝塞尔鼠标轨迹、随机延时、随机滚动、长暂停、节奏抖动 |
 | 可观测 | 逐项日志、Markdown+JSON 报告、进度落盘可续跑、日志自动脱敏 |
