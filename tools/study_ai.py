@@ -596,15 +596,20 @@ def main():
                 #   满 3 振标记 needs_manual，后续轮次连页面都不再打开。
                 manual_out = False
                 if not pc_skip and not up_skip:
-                    _failed_now = bool(
+                    quiz_failed = bool(
                         quiz_info and (
                             quiz_info.get("unrecognized")   # 题型识别不了（人物匹配等）
                             or quiz_info.get("incomplete")  # 平台拦「还有未作答」
+                            or quiz_info.get("unanswered")  # 存在未作答题块
+                            # 有答题信息但没提交成功（提交按钮为空、标记已看失败等）
+                            or (quiz_info.get("submitted") == ""
+                                and not pc_skip and not up_skip)
                             # 题库已有标准答案仍 0 分 / 第二遍仍全错：
                             # 重做也救不回来（如全答全错的人物匹配页）
                             or (quiz_info.get("score") == 0
                                 and (_pass >= 1
                                      or str(lf.get("id")) in bank_answered))))
+                    _failed_now = quiz_failed
                     if _failed_now:
                         _strikes = state.count_fail(lf.get("id"), lf.get("name"))
                         if _strikes >= 3:
@@ -689,12 +694,17 @@ def main():
                 if manual_out:
                     rec["status"] = "needs_manual"
                     rec["needs_manual"] = True
+                elif quiz_failed and not (pc_skip or up_skip):
+                    # 题目未完成：不计入成功，但保留未完成状态以便下一轮重试。
+                    rec["status"] = "incomplete"
+                    rec["quiz_failed"] = True
                 report.append(rec)
                 # 增量落盘：中途 Ctrl+C / 崩溃也不会丢掉本轮已判定的结论
                 state.mark(lf.get("id"),
                            "needs_manual" if manual_out else
                            ("unsupported_pc" if pc_skip else
-                            ("needs_upload" if up_skip else "done")),
+                            ("needs_upload" if up_skip else
+                             ("incomplete" if quiz_failed else "done"))),
                            lf.get("name"))
                 extra = ""
                 if quiz_info:
@@ -709,7 +719,8 @@ def main():
                             else f"○ 本节「{lf.get('micro')}」仍白圈")
                 elif blue_delta > 0:
                     mark = "● 蓝圈+1"
-                log.info(f"  完成（媒体={'有' if played else '无'}{extra}） {mark}")
+                _verb = "未完成" if rec["status"] == "incomplete" else "完成"
+                log.info(f"  {_verb}（媒体={'有' if played else '无'}{extra}） {mark}")
 
             out = Path(cfg.output_dir) / "study_ai_report.json"
             gained = sum(r.get("blue_delta", 0) for r in report)
@@ -718,6 +729,8 @@ def main():
                        if r.get("status") == "unsupported_pc"]
             manual_out_list = [r.get("name") for r in report
                                if r.get("status") == "needs_manual"]
+            incomplete_list = [r.get("name") for r in report
+                               if r.get("status") == "incomplete"]
             cached_skips = sum(1 for r in report
                               if r.get("status") == "skipped_cached_unsupported")
             manual_skips = sum(1 for r in report
@@ -730,6 +743,7 @@ def main():
                                        "micros_turned": turned,
                                        "unsupported_pc": pc_only,
                                        "needs_manual": manual_out_list,
+                                       "incomplete": incomplete_list,
                                        "cached_skips": cached_skips,
                                        "manual_skips": manual_skips,
                                        "upload_skips": upload_skips,
@@ -741,6 +755,8 @@ def main():
                 log.info(f"蓝圈新增 {gained} 个；本节变蓝: {turned or '无'}")
             if pc_only:
                 log.info(f"PC 端不支持、需在 App 端完成：{len(pc_only)} 项（已跳过，未浪费时长）")
+            if incomplete_list:
+                log.info(f"题目未完成、计入未完成：{len(incomplete_list)} 项（下轮会重试）")
             if upload_skips:
                 log.info(f"需手动上传作品：{upload_skips} 项（已跳过）")
             if manual_out_list or manual_skips:

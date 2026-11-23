@@ -8,7 +8,7 @@
     python tools/api_run.py --minutes 90    # 刷 90 分钟
     python tools/api_run.py --probe         # 只验证登录链路，不刷时长
 
-前提：config.yaml 里填好 account.username / account.password
+账号密码优先从本机加密存储读取；首次运行会弹窗询问并加密保存。
 """
 import argparse
 import sys
@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from upc.api_client import UnipusAPI          # noqa: E402
 from upc.config import load_config            # noqa: E402
 from upc.logutil import setup_logging         # noqa: E402
+from upc.secret import load_secret, save_secret  # noqa: E402
 
 
 def pick(options, prompt):
@@ -113,20 +114,15 @@ def gui_auth(default_user=""):
     return None, None
 
 
-def save_credentials(root, username, password):
-    """把账号密码写回 config.yaml 的 account 段，下次不再弹窗。
-
-    只在 account 段内替换，避免误改 llm 等其他段的同名字段。
-    注意：这是**明文**保存在本机文件里（仅本机可读，不上传）。
-    """
-    import json as _json
+def _blank_config_account(root):
+    """把 config.yaml 的 account.username/password 清空，避免明文残留。"""
     import re as _re
 
     cfg_path = root / "config.yaml"
     if not cfg_path.exists():
         return False
     lines = cfg_path.read_text(encoding="utf-8").split("\n")
-    in_acc, done_u, done_p = False, False, False
+    in_acc, changed = False, False
     for i, ln in enumerate(lines):
         if _re.match(r"^account:\s*$", ln):
             in_acc = True
@@ -135,15 +131,39 @@ def save_credentials(root, username, password):
             break
         if not in_acc:
             continue
-        if not done_u and _re.match(r"^\s+username:", ln):
-            lines[i] = "  username: " + _json.dumps(username, ensure_ascii=False)
-            done_u = True
-        elif not done_p and _re.match(r"^\s+password:", ln):
-            lines[i] = "  password: " + _json.dumps(password, ensure_ascii=False)
-            done_p = True
-    if done_u and done_p:
+        if _re.match(r"^\s+username:", ln):
+            lines[i] = '  username: ""'
+            changed = True
+        elif _re.match(r"^\s+password:", ln):
+            lines[i] = '  password: ""'
+            changed = True
+    if changed:
         cfg_path.write_text("\n".join(lines), encoding="utf-8")
-    return done_u and done_p
+    return changed
+
+
+def save_credentials(root, username, password):
+    """加密保存账号密码到本机 DPAPI 存储，并清空 config.yaml 中的明文。"""
+    if not username or not password:
+        return False
+    if not (save_secret("account_username", username)
+            and save_secret("account_password", password)):
+        return False
+    _blank_config_account(root)
+    return True
+
+
+def load_account(cfg):
+    """从加密存储读取账号密码；顺手把 config.yaml 里的明文迁移并清空。"""
+    cfg_user = str(cfg.account.get("username") or "")
+    cfg_pass = str(cfg.account.get("password") or "")
+    user = cfg_user or load_secret("account_username") or ""
+    password = cfg_pass or load_secret("account_password") or ""
+    if cfg_user or cfg_pass:
+        save_credentials(ROOT, user, password)
+    cfg.account["username"] = user
+    cfg.account["password"] = password
+    return user, password
 
 
 def main():
@@ -163,6 +183,7 @@ def main():
 
     cfg = load_config(args.config)
     log = setup_logging(cfg.log_dir, cfg.log_level)
+    load_account(cfg)
 
     api = UnipusAPI(cfg, log)
 
@@ -173,7 +194,7 @@ def main():
         reused = api.load_session()
 
     if not reused:
-        # 缺账号密码时弹窗要（不落盘）
+        # 缺账号密码时弹窗询问，加密保存到本机，不写 config.yaml
         if not str(cfg.account.get("username") or "") or not str(cfg.account.get("password") or ""):
             log.info("缺少账号密码，弹出输入框…")
             u, p = gui_auth(str(cfg.account.get("username") or ""))
@@ -193,11 +214,10 @@ def main():
             cfg.account["username"] = u
             cfg.account["password"] = p
             log.info(f"已收到账号：{u[:3]}****{u[-2:] if len(u) > 5 else ''}")
-            # ★ 立即写进 config.yaml，以后运行不再询问
             if save_credentials(ROOT, u, p):
-                log.info("账号密码已保存到 config.yaml（明文，仅本机），下次不再询问")
+                log.info("账号密码已加密保存到本机（DPAPI），下次不再询问")
             else:
-                log.warning("账号密码保存失败（请手动填入 config.yaml 的 account 段）")
+                log.warning("账号密码加密保存失败，本轮仍可继续；请检查本机凭据存储权限")
 
         log.info("=" * 58)
         log.info("U校园 API 模式（不走浏览器，无网页认证）")

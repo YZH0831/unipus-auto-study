@@ -117,7 +117,7 @@ class UnipusAPI:
             data["encodeCaptha"] = encode_captcha
         body = json.dumps(data, separators=(",", ":"))
         try:
-            resp = self.session.post(LOGIN_URL, data=body, timeout=25, verify=False)
+            resp = self.session.post(LOGIN_URL, data=body, timeout=25, verify=True)
         except Exception as exc:  # noqa: BLE001
             return "NETWORK", f"请求失败: {exc}", None
         if resp.status_code != 200:
@@ -157,7 +157,7 @@ class UnipusAPI:
     def get_captcha(self):
         """取图形验证码。返回 (base64图片, encodeCaptha) 或 (None, None)。"""
         try:
-            resp = self.session.post(CAPTCHA_URL, timeout=20, verify=False)
+            resp = self.session.post(CAPTCHA_URL, timeout=20, verify=True)
             j = resp.json()
         except Exception as exc:  # noqa: BLE001
             self.log.warning(f"获取验证码失败: {exc}")
@@ -219,7 +219,7 @@ class UnipusAPI:
         # ① 先不跟随重定向，看清它想把你送去哪
         try:
             r = self.session.get(url, params=params, timeout=25,
-                                 verify=False, allow_redirects=False)
+                                 verify=True, allow_redirects=False)
             loc = r.headers.get("Location", "")
             self.log.info(f"  bind_ticket: HTTP {r.status_code}"
                           + (f" → Location: {loc[:140]}" if loc else "（无重定向）"))
@@ -233,7 +233,7 @@ class UnipusAPI:
 
         # ② 正常跟随（和原项目一致）
         try:
-            r2 = self.session.get(url, params=params, timeout=25, verify=False)
+            r2 = self.session.get(url, params=params, timeout=25, verify=True)
             self.log.info(f"  bind_ticket 跟随重定向后: HTTP {r2.status_code} "
                           f"最终 URL={r2.url[:120]}")
             self._dump("bind_ticket", r2.text or "")
@@ -332,7 +332,7 @@ class UnipusAPI:
         params = {"openId": self.openid, "source": "0",
                   "callback": "jsonp_0000000000"}
         try:
-            resp = self.session.get(url, params=params, timeout=25, verify=False)
+            resp = self.session.get(url, params=params, timeout=25, verify=True)
         except Exception as exc:  # noqa: BLE001
             self.log.warning(f"取用户信息失败: {exc}")
             return None
@@ -407,7 +407,7 @@ class UnipusAPI:
         for i, extra in enumerate(attempts, 1):
             try:
                 resp = self.session.get(url, params=params, timeout=25,
-                                        verify=False, headers=extra)
+                                        verify=True, headers=extra)
                 text = resp.text or ""
                 self._dump(f"get_token{'' if i == 1 else i}", text)
                 if text.lstrip().startswith("<"):
@@ -449,7 +449,7 @@ class UnipusAPI:
         params = {"school_id": self.school_id}
         try:
             resp = self.session.get(url, params=params, timeout=30,
-                                    allow_redirects=False, verify=False)
+                                    allow_redirects=False, verify=True)
         except Exception as exc:  # noqa: BLE001
             self.log.warning(f"取课程列表失败: {exc}")
             return []
@@ -498,7 +498,7 @@ class UnipusAPI:
         url = (f"https://ucontent.unipus.cn/course/api/v2/course_progress/"
                f"{tutorial_id}/{self.openid}/default/")
         try:
-            resp = self.session.get(url, timeout=25, verify=False)
+            resp = self.session.get(url, timeout=25, verify=True)
             j = resp.json()
         except Exception as exc:  # noqa: BLE001
             self.log.warning(f"取单元失败: {exc}")
@@ -523,7 +523,7 @@ class UnipusAPI:
         url = (f"https://ucontent.unipus.cn/course/api/v2/course_progress/"
                f"{tutorial_id}/{unit}/{self.openid}/default/")
         try:
-            resp = self.session.get(url, timeout=25, verify=False)
+            resp = self.session.get(url, timeout=25, verify=True)
             j = resp.json()
         except Exception as exc:  # noqa: BLE001
             self.log.debug(f"取 {unit} 章节失败: {exc}")

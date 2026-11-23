@@ -489,6 +489,12 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 
+if not exist "tools\ui_server.py" (
+  echo [错误] 缺少 tools\ui_server.py，项目文件不完整。
+  pause
+  exit /b 1
+)
+
 rem 双击 / ui = 打开控制面板
 if "%~1"=="" goto ui
 if /i "%~1"=="ui" goto ui

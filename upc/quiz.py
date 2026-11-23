@@ -48,14 +48,25 @@ JS_SCAN = r"""
   // ---------- 1) 选择类（radio / checkbox） ----------
   const inputs = Array.from(document.querySelectorAll('input[type="radio"], input[type="checkbox"]'));
   const groups = new Map();
+  let nonameIdx = 0;
+  const groupKeyFor = (el, i) => {
+    let p = el.parentElement, depth = 0;
+    while (p && depth < 6
+           && p.querySelectorAll('input[type="radio"],input[type="checkbox"]').length <= 1) {
+      p = p.parentElement; depth++;
+    }
+    if (!p) return '__noname_' + (nonameIdx++);
+    let key = p.getAttribute('data-upc-group');
+    if (!key) {
+      key = '__noname_' + (nonameIdx++);
+      p.setAttribute('data-upc-group', key);
+    }
+    return key;
+  };
   inputs.forEach((el, i) => {
     if (!el.name) {
-      // 没有 name 的，用最近的题目容器兜底分组
-      let p = el.parentElement, depth = 0;
-      while (p && depth < 6 && !p.querySelectorAll('input[type="radio"],input[type="checkbox"]').length > 1) {
-        p = p.parentElement; depth++;
-      }
-      const key = '__noname_' + (p ? Array.from(document.body.children).indexOf(p) : i);
+      // 没有 name 的，用最近的题目容器兜底分组（每个容器唯一 key）
+      const key = groupKeyFor(el, i);
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(el);
       return;
@@ -380,7 +391,10 @@ class QuizSolver:
         if not answer:
             return False
         scope = q.frame or page
-        letters = q.letters()
+        # 以本次传入的 answer 为准；调用方在填充成功后才设置 q.answer，
+        # 直接读 q.answer 会导致首次作答永远没有目标选项。
+        letters = [x.strip().upper() for x in
+                   re.split(r"[,，、;；\s/]+", str(answer or "")) if x.strip()]
 
         if q.qtype in ("single", "multi"):
             if not q.options:
@@ -400,6 +414,15 @@ class QuizSolver:
             if not targets:
                 self.log.warning(f"    答案 {answer} 无法对到任何选项（选项 {[o.get('letter') for o in q.options]}）")
                 return False
+            # 先清除本题已有选择，避免多选题残留错误选项。
+            try:
+                scope.evaluate(r"""(qi) => {
+                  document.querySelectorAll('[data-upc-opt^="' + qi + '_"]').forEach(e => {
+                    if (e.matches('input[type=radio],input[type=checkbox]') && e.checked) e.click();
+                  });
+                }""", q.qi)
+            except Exception:  # noqa: BLE001
+                pass
             ok = False
             for idx in targets:
                 sel = f'[data-upc-opt="{q.qi}_{idx}"]'
@@ -419,6 +442,23 @@ class QuizSolver:
                     time.sleep(random.uniform(*self._delay()))
                 except Exception as exc:  # noqa: BLE001
                     self.log.debug(f"    选项点击失败: {str(exc)[:60]}")
+            if ok:
+                checked = set()
+                for i in range(len(q.options)):
+                    try:
+                        sel = (f'[data-upc-opt="{q.qi}_{i}"][type="radio"],'
+                               f'[data-upc-opt="{q.qi}_{i}"][type="checkbox"]')
+                        els = scope.query_selector_all(sel)
+                        el = next((e for e in els if e.is_visible()), None)
+                        if el is not None and el.is_checked():
+                            checked.add(i)
+                    except Exception:  # noqa: BLE001
+                        continue
+                expected = set(targets)
+                ok = (checked == expected) if q.qtype == "single" else (
+                    bool(checked) and checked == expected)
+                if not ok:
+                    self.log.warning(f"    答案填充后核对失败：期望 {sorted(expected)}，实际 {sorted(checked)}")
             return ok
 
         # 填空 / 作文
@@ -456,11 +496,25 @@ class QuizSolver:
         return None, None
 
     def click_submit(self, page):
-        """点击提交并处理确认框。返回是否点到。"""
+        """点击提交并处理确认框；只有观察到请求或页面变化才算提交成功。"""
         scope, el = self.find_submit(page)
         if el is None:
             self.log.warning("    未找到提交按钮")
             return False
+        evidence = []
+
+        def _on_response(r):
+            url = (r.url or "").lower()
+            if any(k in url for k in ("submit", "answer", "check", "quiz",
+                                      "test", "result", "score")):
+                evidence.append((r.status, url))
+
+        before_url = getattr(page, "url", "")
+        listener_ok = True
+        try:
+            page.on("response", _on_response)
+        except Exception:  # noqa: BLE001  FakePage/无事件接口时降级
+            listener_ok = False
         try:
             if self.humanizer:
                 self.humanizer.click(page, el, timeout=8000)
@@ -469,21 +523,34 @@ class QuizSolver:
         except Exception as exc:  # noqa: BLE001
             self.log.warning(f"    点击提交失败: {str(exc)[:80]}")
             return False
-        page.wait_for_timeout(1200)
-        if self.cfg.quiz.submit_confirm and self.popup:
-            self.popup.sweep(page, rounds=2)
-        # 通用确认框
-        for sc in self._scopes(page):
-            for txt in ("确定提交", "确认提交", "确定", "确认", "交卷"):
+        finally:
+            try:
+                page.wait_for_timeout(1200)
+            except Exception:  # noqa: BLE001
+                pass
+            if self.cfg.quiz.submit_confirm and self.popup:
+                self.popup.sweep(page, rounds=2)
+            # 通用确认框
+            for sc in self._scopes(page):
+                for txt in ("确定提交", "确认提交", "确定", "确认", "交卷"):
+                    try:
+                        btn = sc.query_selector(f'button:has-text("{txt}")')
+                        if btn is not None and btn.is_visible():
+                            btn.click(timeout=3000)
+                            page.wait_for_timeout(800)
+                            break
+                    except Exception:  # noqa: BLE001
+                        continue
+            if listener_ok:
                 try:
-                    btn = sc.query_selector(f'button:has-text("{txt}")')
-                    if btn is not None and btn.is_visible():
-                        btn.click(timeout=3000)
-                        page.wait_for_timeout(800)
-                        break
+                    page.remove_listener("response", _on_response)
                 except Exception:  # noqa: BLE001
-                    continue
-        return True
+                    pass
+        after_url = getattr(page, "url", "")
+        ok = bool(evidence) or bool(before_url and after_url and before_url != after_url)
+        if not ok:
+            self.log.warning("    已点击提交，但未观察到提交请求或页面变化，不判定为成功")
+        return ok
 
     def collect_feedback(self, page):
         """从 DOM 收集"正确答案：X"文本。"""
