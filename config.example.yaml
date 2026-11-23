@@ -69,13 +69,14 @@ video:
 quiz:
   enabled: true
 
-  # sniff  ：试答→嗅探接口返回的正确答案→回填重答（无需题库，命中率高，会消耗一次作答）
-  # cache  ：只用本地题库，从不试答（最保守）
-  # llm    ：直接调大模型作答
-  # hybrid ：cache → llm → 兜底（实测最实用，不消耗作答次数）
+  # ★ 真实行为（2026-11-23 审计对齐）：strategy/two_pass 在本链路
+  #   （upc/runner.py + upc/quiz.py）未实现差异化，答题固定为
+  #   本地题库 → 大模型 → 兜底猜；sniff 试答嗅探与"第二遍按答案重做"
+  #   均无代码实现。真正的两遍满分刷走 AI 版链路：
+  #   tools/study_ai.py --passes 2（解密判题接口拿标准答案 → 第二遍满分）。
   strategy: hybrid
 
-  # 交卷后把答案沉淀到 data/answers.json，下次同样的题直接命中
+  # 预留项：本链路未实现（见上），保留只为兼容旧配置文件
   two_pass: true
 
   # 0 = 不限
@@ -90,6 +91,7 @@ quiz:
     max_calls: 200
 
   tiku:
+    # ★ upc 链路未实现第三方题库（无代码读取此段），预留字段
     enabled: false
     providers: []
     # providers:

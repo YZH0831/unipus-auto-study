@@ -101,10 +101,10 @@ goto menu
 :aiauto
 echo.
 echo === AI版：双击直跑模式 ===
-echo   默认：60 分钟 / 视听说 / 全部课程 / 双遍补满分
+echo   默认：60 分钟 / 视听说+读写两本 / 全部课程 / 双遍补满分
 echo   Ctrl+C 可中断；想指定单元/分钟请用菜单 [S]
 echo.
-"%PY%" -u tools\study_ai.py --minutes 60 --passes 2
+"%PY%" -u tools\study_ai.py --minutes 60 --passes 2 --book all
 set "RC=%ERRORLEVEL%"
 echo.
 pause

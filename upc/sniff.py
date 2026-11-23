@@ -24,14 +24,22 @@ URL_KEYWORDS = ("api", "ajax", "submit", "check", "answer", "question",
                 "exercise", "quiz", "test", "judge", "score", "result",
                 "unit", "task", "paper")
 
-# 顶层/递归里出现即视为答案的键名（小写匹配）
-ANSWER_KEYS = (
-    "correctanswer", "correct_answer", "rightanswer", "right_answer",
-    "standardanswer", "standard_answer", "answer", "answers",
-    "correctoption", "correct_option", "correctoptions",
-    "rightoption", "rightoptionlist", "correctkey", "key",
-    "solution", "correct", "right",
+# 答案键分级（小写、去 _/- 后匹配）：
+#   强键 = 语义上明确就是"正确答案"的字段，优先采信；
+#   弱键 = 语义含糊——answer/answers 可能是"用户自己提交的答案"（提交响应里
+#          常与正确答案同字段名共存），key/correct/right 也常见于无关字段
+#          （分页 key、判对布尔）。旧实现强弱混排、按 dict 插入序命中，
+#          拿到哪算哪，实测会把本次提交的错误答案当"标准答案"捞回来；
+#          现在强键全层未命中才轮到弱键。
+STRONG_ANSWER_KEYS = (
+    "correctanswer", "rightanswer", "standardanswer",
+    "correctoption", "correctoptions", "rightoption", "rightoptionlist",
+    "correctkey", "solution",
 )
+WEAK_ANSWER_KEYS = (
+    "answer", "answers", "key", "correct", "right",
+)
+ANSWER_KEYS = STRONG_ANSWER_KEYS + WEAK_ANSWER_KEYS   # 兼容旧引用
 
 # 明确不是答案的键（避免把 answerStatus / answerTime 之类当答案）
 NEGATIVE_KEYS = ("answerstatus", "answertime", "answerid", "answercount",
@@ -209,31 +217,43 @@ def _looks_like_answer(s):
     return False
 
 
+def _norm_key(raw_key):
+    """键名归一：小写、去 _/-（与键表统一形态后比对）。"""
+    return str(raw_key).lower().replace("_", "").replace("-", "")
+
+
 def _find_in_json(data, depth=0, max_depth=4):
-    """递归找答案。先查精确键名，再查包含关键词的键。"""
+    """递归找答案。强键 → 弱键 → 关键词包含 → 递归，逐级降权。"""
     if depth > max_depth:
         return None
 
     if isinstance(data, dict):
-        # ① 精确键名优先
-        for raw_key in data:
-            key = str(raw_key).lower().replace("_", "").replace("-", "")
-            if key in NEGATIVE_KEYS:
-                continue
-            if key in ANSWER_KEYS:
-                ans = _normalize_answer(data[raw_key])
+        # ① 强键（语义明确就是"正确答案"）
+        for raw_key, value in data.items():
+            if _norm_key(raw_key) in STRONG_ANSWER_KEYS:
+                ans = _normalize_answer(value)
                 if ans and _looks_like_answer(ans):
                     return ans
-        # ② 关键词包含
+        # ② 弱键：answer/key 可能装的是用户本次提交的答案，
+        #    同层强键都没命中才考虑，且继续排除 answerStatus 之类状态键
         for raw_key, value in data.items():
-            key = str(raw_key).lower().replace("_", "").replace("-", "")
+            key = _norm_key(raw_key)
+            if key in NEGATIVE_KEYS or key in STRONG_ANSWER_KEYS:
+                continue
+            if key in WEAK_ANSWER_KEYS:
+                ans = _normalize_answer(value)
+                if ans and _looks_like_answer(ans):
+                    return ans
+        # ③ 关键词包含
+        for raw_key, value in data.items():
+            key = _norm_key(raw_key)
             if key in NEGATIVE_KEYS:
                 continue
             if any(k in key for k in ("correct", "rightanswer", "standard")):
                 ans = _normalize_answer(value)
                 if ans and _looks_like_answer(ans):
                     return ans
-        # ③ 递归
+        # ④ 递归
         for value in data.values():
             got = _find_in_json(value, depth + 1, max_depth)
             if got:

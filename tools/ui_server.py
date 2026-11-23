@@ -39,9 +39,11 @@ PROGRESS_FILE = STATE_DIR / "progress.json"
 
 DEFAULT_PREFS = {
     "auto_start": False, "minutes": 60, "passes": 2,
-    "book": "vls", "unit": "", "micro": "", "redo": False,
+    "book": "all", "unit": "", "micro": "", "redo": False,
 }
 PREF_KEYS = tuple(DEFAULT_PREFS)
+# 单例识别标记：/api/health 里回报，用于区分"本项目的面板"和其它本地服务
+APP_TAG = "unipus-panel"
 
 _lock = threading.Lock()
 _proc = None
@@ -214,7 +216,8 @@ def start_study(opts: dict) -> dict:
             return {"ok": False, "msg": "已经有一个任务在跑了，先停止再启动"}
         minutes = _clamp(opts.get("minutes", 60), 1, 600, 60)
         passes = int(_clamp(opts.get("passes", 2), 1, 5, 2))
-        book = opts.get("book") if opts.get("book") in ("vls", "rw") else "vls"
+        book = (opts.get("book") if opts.get("book") in ("vls", "rw", "all")
+                else "all")
         unit = str(opts.get("unit") or "").strip()
         micro = str(opts.get("micro") or "").strip()[:60]
         if unit and not re.fullmatch(r"[0-9,\-\s]{1,30}", unit):
@@ -266,8 +269,18 @@ def stop_study() -> dict:
         p = _proc
     if not p or p.poll() is not None:
         return {"ok": False, "msg": "当前没有正在运行的任务"}
+    # ★ 2026-11-23 修正：terminate() 在 Windows 上就是 TerminateProcess
+    #   硬杀，本来就不会走任何"保存登录态"的清理逻辑（旧文案与行为不符）；
+    #   且它杀不到 Playwright 拉起的浏览器子进程 → Windows 改用 taskkill
+    #   连进程树清理，防浏览器野进程残留。
     try:
-        p.terminate()
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(p.pid)],
+                capture_output=True, timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            p.terminate()
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -278,7 +291,7 @@ def stop_study() -> dict:
             p.wait(timeout=3)
         except Exception:  # noqa: BLE001
             pass
-    return {"ok": True, "msg": "已请求停止（会先保存登录态）"}
+    return {"ok": True, "msg": "已强制结束任务（连同其拉起的浏览器进程）"}
 
 
 # ---------------------------------------------------------------- 配置写入
@@ -293,7 +306,8 @@ def save_prefs(opts: dict) -> dict:
             p[k] = opts[k]
     p["minutes"] = _clamp(p.get("minutes"), 1, 600, 60)
     p["passes"] = int(_clamp(p.get("passes"), 1, 5, 2))
-    p["book"] = p.get("book") if p.get("book") in ("vls", "rw") else "vls"
+    p["book"] = (p.get("book") if p.get("book") in ("vls", "rw", "all")
+                 else "all")
     p["auto_start"] = bool(p.get("auto_start"))
     p["redo"] = bool(p.get("redo"))
     _write_json(PREFS_FILE, p)
@@ -340,6 +354,19 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 别把每个轮询都打到控制台
 
+    def _host_ok(self) -> bool:
+        """拦 DNS 重绑定：Host 不是本机地址的一律拒。"""
+        host = (self.headers.get("Host") or "").split(":")[0]
+        return host in ("127.0.0.1", "localhost", "::1")
+
+    def _fetch_ok(self) -> bool:
+        """拦浏览器跨站 POST（网页里的 no-cors 表单也能打到本地端口，
+        会越权启动任务/改写规则）。Sec-Fetch-Site 主流浏览器全量发送，
+        缺失视为老客户端放行；same-origin=面板自己；none=地址栏直接打开。
+        """
+        fs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        return fs in ("", "same-origin", "same-site", "none")
+
     def _bytes(self, data: bytes, ctype: str, code: int = 200):
         try:
             self.send_response(code)
@@ -357,6 +384,9 @@ class Handler(BaseHTTPRequestHandler):
                     "application/json; charset=utf-8", code)
 
     def do_GET(self):
+        if not self._host_ok():
+            self._json({"error": "forbidden host"}, 403)
+            return
         u = urlparse(self.path)
         p = u.path
         if p in ("/", "/index.html"):
@@ -376,11 +406,14 @@ class Handler(BaseHTTPRequestHandler):
         elif p == "/api/report":
             self._json(_read_json(REPORT_FILE, {"has_data": False}))
         elif p == "/api/health":
-            self._json({"ok": True})
+            self._json({"ok": True, "app": APP_TAG, "root": str(ROOT)})
         else:
             self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._host_ok() or not self._fetch_ok():
+            self._json({"error": "forbidden"}, 403)
+            return
         p = urlparse(self.path).path
         try:
             ln = int(self.headers.get("Content-Length") or 0)
@@ -519,6 +552,37 @@ def _port_in_use(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _find_running(start: int) -> int:
+    """扫端口段找本项目的活面板（app 标记 + 项目根双重校验，不认错别的服务）。"""
+    import urllib.request
+    me = str(ROOT).lower()
+    for port in range(start, start + 20):
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/health", timeout=0.3) as r:
+                d = json.loads(r.read().decode("utf-8"))
+                if d.get("app") == APP_TAG and str(d.get("root", "")).lower() == me:
+                    return port
+        except Exception:  # noqa: BLE001
+            continue
+    return 0
+
+
+def _focus_existing_window() -> bool:
+    """已有面板窗口（Edge 应用模式/pywebview，标题同 ui/index.html）就唤到前台。"""
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        h = u.FindWindowW(None, "U校园自动化助手 · 控制面板")
+        if not h:
+            return False
+        u.ShowWindow(h, 9)          # SW_RESTORE
+        u.SetForegroundWindow(h)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def main() -> int:
     _ensure_streams()
     ap = argparse.ArgumentParser(description="U校园助手本地控制面板")
@@ -529,6 +593,20 @@ def main() -> int:
                     help="窗口形态：native=原生窗口，app=Edge/Chrome 应用窗口")
     ap.add_argument("--no-browser", action="store_true", help="只起服务不开窗口")
     a = ap.parse_args()
+
+    # ★ 单例：已有本项目的面板在跑就聚焦已有窗口，不再起第二个服务。
+    #   （双击两次 = 两个服务两个 Edge 窗口抢同一份 profile，互相干扰，
+    #     端口文件还会被第二个实例覆盖。）
+    running = _find_running(a.port)
+    if running:
+        url = f"http://127.0.0.1:{running}/"
+        print(f"面板已在运行：{url}（不再重复起服务）")
+        if not a.no_browser:
+            if _focus_existing_window():
+                print("已把面板窗口唤到前台")
+            else:
+                launch_window(url, a.mode)
+        return 0
 
     httpd, port = None, a.port
     for i in range(20):

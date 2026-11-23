@@ -124,10 +124,14 @@ def main():
     ap.add_argument("--minutes", type=float, default=60)
     ap.add_argument("--redo", action="store_true",
                     help="连已 pass 的叶子也重做（默认跳过，省时间）")
+    ap.add_argument("--redo-low", action="store_true",
+                    help="把题库里分数未满的已pass叶子拉回重做（默认关闭：这些题"
+                         "平台已记pass且进入回顾态，重做改不了分，只会无限循环）")
     ap.add_argument("--passes", type=int, default=2,
                     help="跑几遍：第 1 遍摸标准答案，第 2 遍按题库满分（默认 2）")
     ap.add_argument("--per-task", type=float, default=70, help="每个任务点停留秒数")
-    ap.add_argument("--book", default="vls", choices=list(BOOK_KEY), help="vls=视听说 rw=读写")
+    ap.add_argument("--book", default="vls", choices=list(BOOK_KEY) + ["all"],
+                    help="vls=视听说 rw=读写 all=两本串行全刷（默认 vls）")
     ap.add_argument("--from", dest="start_from", type=int, default=0,
                     help="从第 N 个任务开始（断点续跑）")
     ap.add_argument("--video-max-min", type=float, default=10, help="单视频最多等多久")
@@ -168,6 +172,9 @@ def main():
     ap.add_argument("--list", action="store_true", help="只列任务清单")
     ap.add_argument("--reset-progress", action="store_true",
                     help="清空本地断点续跑缓存（平台改版后用）")
+    ap.add_argument("--retry-manual", action="store_true",
+                    help="解除全部「三振出局」标记，让反复失败的叶子重新尝试"
+                         "（修好新题型后用；再失败会很快重新出局）")
     args = ap.parse_args()
 
     from upc import video as V
@@ -191,9 +198,16 @@ def main():
     if args.reset_progress:
         state.clear()
         log.info("已清空本地断点续跑缓存，本轮重新判定所有叶子")
-    elif state.cached_unsupported_count:
-        log.info(f"本地断点续跑缓存：{state.cached_unsupported_count} 个 "
-                 f"PC 端不支持项（{res['ttl_days']:g} 天内直接跳过）")
+    else:
+        if getattr(args, "retry_manual", False):
+            _n = state.reset_manual()
+            log.info(f"[--retry-manual] 已解除 {_n} 个三振出局标记，本轮重新尝试")
+        # 历史失败现场（unknown_/incomplete_ dump）预置 2 振：
+        # 这些叶子反复重做过仍不 pass，再失败 1 次即出局，不再无限重做
+        state.seed_fails_from_dumps(ROOT / "output", log)
+        if state.cached_unsupported_count:
+            log.info(f"本地断点续跑缓存：{state.cached_unsupported_count} 个 "
+                     f"PC 端不支持项（{res['ttl_days']:g} 天内直接跳过）")
 
     sess_file = Path(cfg.state_dir) / "api_session.json"
     if not sess_file.exists():
@@ -396,16 +410,30 @@ def main():
             except Exception as exc:  # noqa: BLE001
                 log.warning(f"  读取 pass 状态失败，不跳过: {str(exc)[:60]}")
 
-        # ★ "别错题"：平台只要提交过就记 pass=1，哪怕 scorePct=0.2。
-        #   所以题库里分数没满的叶子必须纳入重做，不能被跳过逻辑漏掉。
+        # ★ 低分题重做开关（默认关闭）：
+        #   平台对已提交过的题记 pass=1，且重进是「回顾态」——控件锁定、
+        #   无法真正改答案，重做只会反复消耗时间却永远不涨分。
+        #   因此默认【尊重平台 pass 状态，跳过所有已完成叶子】。
+        #   仅当用户显式 --redo-low 时，才把题库里 score≠1 的叶子拉回重做。
         low_ids = set()
+        if args.redo_low:
+            try:
+                low_ids = {str(k) for k, v in (_load_bank() or {}).items()
+                           if (v.get("score") or 0) != 1}
+            except Exception:  # noqa: BLE001
+                pass
+            if low_ids:
+                log.info(f"  [--redo-low] 题库中 {len(low_ids)} 个叶子分数未满，纳入重做")
+        else:
+            log.info("  已完成叶子全部跳过（低分题重做默认关闭，如需强刷加 --redo-low）")
+        # 题库里已有可用答案的叶子（三振判定用：这些叶子再交 0 分
+        # 说明题库答案也救不回来，重做无意义，计一振）
+        bank_answered = set()
         try:
-            low_ids = {str(k) for k, v in (_load_bank() or {}).items()
-                       if (v.get("score") or 0) != 1}
+            bank_answered = {str(k) for k, v in (_load_bank() or {}).items()
+                             if v.get("blocks") or v.get("letters")}
         except Exception:  # noqa: BLE001
             pass
-        if low_ids:
-            log.info(f"  题库中 {len(low_ids)} 个叶子分数未满，纳入重做")
 
         if args.plan:
             _uni = [x for x in content
@@ -419,22 +447,27 @@ def main():
             log.info(f"预演清单：范围内共 {len(_uni)} 个叶子")
             _todo = 0
             _cached = 0
+            _manual = 0
             for _i, _x in enumerate(_uni, 1):
                 _islow = str(_x.get("id")) in (low_ids or set())
                 _done = (str(_x.get("id")) in (passed_ids or set())
                          and not _islow)
-                _app_only = state.is_cached_unsupported(_x.get("id"))
-                if _app_only:
-                    _cached += 1
+                _skip_st = state.cached_status(_x.get("id"))
+                if _skip_st:
+                    if _skip_st == "needs_manual":
+                        _manual += 1
+                    else:
+                        _cached += 1
                 elif not _done:
                     _todo += 1
-                _tag = ("App端" if _app_only else
+                _tag = ("三振出局" if _skip_st == "needs_manual" else
+                        "App端" if _skip_st else
                         "跳过" if _done else ("补分" if _islow else "待做"))
                 log.info(f"  [{_tag}] "
                          f"m{_x.get('micro_idx'):<2} {_x.get('name')[:22]:<24} "
                          f"{_x.get('tab_type') or _x.get('base')}")
-            log.info(f"实际待做 {_todo} 个 / App 端跳过 {_cached} 个 / "
-                     f"范围内 {len(_uni)} 个")
+            log.info(f"实际待做 {_todo} 个 / App 端等缓存跳过 {_cached} 个 / "
+                     f"三振出局 {_manual} 个 / 范围内 {len(_uni)} 个")
             log.info("=" * 62)
             return 0
 
@@ -470,10 +503,20 @@ def main():
                         and str(lf.get("id")) not in low_ids):
                     log.debug(f"  跳过已完成且满分: {lf.get('name')}")
                     continue
-                # 断点续跑：本地已判定「PC 端不支持」的叶子连页面都不打开
-                if state.is_cached_unsupported(lf.get("id")):
-                    log.debug(f"  跳过本地缓存的 App 端项: {lf.get('name')}")
-                    report.append({**lf, "status": "skipped_cached_unsupported"})
+                # 断点续跑：本地已判定「永远做不完」的叶子连页面都不打开
+                # （App 端不支持 / 需手动上传 / 三振出局，程序都无法代劳）
+                _skip_st = state.cached_status(lf.get("id"))
+                if _skip_st:
+                    if _skip_st == "needs_upload":
+                        log.debug(f"  跳过需手动上传作品的项: {lf.get('name')}")
+                        report.append({**lf, "status": "skipped_needs_upload"})
+                    elif _skip_st == "needs_manual":
+                        log.debug(f"  跳过反复失败的项（三振出局）: {lf.get('name')}")
+                        report.append({**lf, "status": "skipped_needs_manual"})
+                    else:
+                        log.debug(f"  跳过本地缓存的 App 端项: {lf.get('name')}")
+                        report.append({**lf,
+                                       "status": "skipped_cached_unsupported"})
                     continue
                 if args.start_from and i < args.start_from:
                     continue
@@ -546,9 +589,45 @@ def main():
                     quiz_info = _handle_quiz(session, cfg, log, page, popup,
                                              humanizer, lf, args.choice_mode)
                 pc_skip = bool(quiz_info and quiz_info.get("unsupported_pc"))
-                if pc_skip:
+                up_skip = bool(quiz_info and quiz_info.get("needs_upload"))
+                # ★ 三振出局：同一叶子反复失败说明题型程序做不了
+                #   （识别不了/平台拦未作答/题库答案也救不回的 0 分），
+                #   每次失败计一振（历史现场 dump 已预置 2 振），
+                #   满 3 振标记 needs_manual，后续轮次连页面都不再打开。
+                manual_out = False
+                if not pc_skip and not up_skip:
+                    _failed_now = bool(
+                        quiz_info and (
+                            quiz_info.get("unrecognized")   # 题型识别不了（人物匹配等）
+                            or quiz_info.get("incomplete")  # 平台拦「还有未作答」
+                            # 题库已有标准答案仍 0 分 / 第二遍仍全错：
+                            # 重做也救不回来（如全答全错的人物匹配页）
+                            or (quiz_info.get("score") == 0
+                                and (_pass >= 1
+                                     or str(lf.get("id")) in bank_answered))))
+                    if _failed_now:
+                        _strikes = state.count_fail(lf.get("id"), lf.get("name"))
+                        if _strikes >= 3:
+                            manual_out = True
+                            # 整节不可能变蓝了，回退真实播放重做纯属浪费
+                            unsupported_micros.add(midx)
+                            state.mark(lf.get("id"), "needs_manual",
+                                       lf.get("name"))
+                            log.warning(f"    三振出局：累计失败 {_strikes} 次，"
+                                        "已标记为需手动完成，"
+                                        "后续轮次不再重做（--retry-manual 可重试）")
+                        else:
+                            log.info(f"    未完成（{_strikes}/3 振，"
+                                     "满 3 次自动跳过不再重做）")
+                if pc_skip or up_skip or manual_out:
+                    # 三类都一样：本节有程序永远做不完的项，圈不可能变蓝，
+                    # 必须记入"不可完成"集合，否则收尾的自适应回退会把
+                    # 整节真实播放重做一遍——纯浪费（实测白耗 6 分钟）。
                     unsupported_micros.add(midx)
+                if pc_skip:
                     log.info("  PC 端不支持，跳过停留计时（该项需在 App 端完成）")
+                elif manual_out:
+                    log.info("  三振出局项，跳过停留计时（停留已无意义）")
                 else:
                     remain = max(0.0, args.per_task - (90 if played else 0))
                     _dwell(session, cfg, log, page, remain, popup, humanizer)
@@ -604,10 +683,18 @@ def main():
                     rec["unsupported_pc"] = True
                     if quiz_info and quiz_info.get("skip_reason"):
                         rec["skip_reason"] = quiz_info["skip_reason"]
+                if up_skip:
+                    rec["status"] = "needs_upload"
+                    rec["needs_upload"] = True
+                if manual_out:
+                    rec["status"] = "needs_manual"
+                    rec["needs_manual"] = True
                 report.append(rec)
                 # 增量落盘：中途 Ctrl+C / 崩溃也不会丢掉本轮已判定的结论
                 state.mark(lf.get("id"),
-                           "unsupported_pc" if pc_skip else "done",
+                           "needs_manual" if manual_out else
+                           ("unsupported_pc" if pc_skip else
+                            ("needs_upload" if up_skip else "done")),
                            lf.get("name"))
                 extra = ""
                 if quiz_info:
@@ -616,7 +703,8 @@ def main():
                 if micro_turned:
                     mark = f"● 本节「{lf.get('micro')}」蓝圈点亮"
                 elif is_last and micro_now is False:
-                    mark = (f"○ 本节「{lf.get('micro')}」含 PC 端不支持项，需 App 端完成"
+                    mark = (f"○ 本节「{lf.get('micro')}」含做不完的项"
+                            f"（PC 端不支持 / 需上传 / 三振出局），需手动收尾"
                             if midx in unsupported_micros
                             else f"○ 本节「{lf.get('micro')}」仍白圈")
                 elif blue_delta > 0:
@@ -628,13 +716,23 @@ def main():
             turned = [r.get("micro") for r in report if r.get("micro_turned")]
             pc_only = [r.get("name") for r in report
                        if r.get("status") == "unsupported_pc"]
+            manual_out_list = [r.get("name") for r in report
+                               if r.get("status") == "needs_manual"]
             cached_skips = sum(1 for r in report
                               if r.get("status") == "skipped_cached_unsupported")
+            manual_skips = sum(1 for r in report
+                               if r.get("status") == "skipped_needs_manual")
+            upload_skips = sum(1 for r in report
+                               if r.get("status") in
+                               ("needs_upload", "skipped_needs_upload"))
             out.write_text(json.dumps({"elapsed_min": round((time.time() - started) / 60, 1),
                                        "done": done, "blue_gained": gained,
                                        "micros_turned": turned,
                                        "unsupported_pc": pc_only,
+                                       "needs_manual": manual_out_list,
                                        "cached_skips": cached_skips,
+                                       "manual_skips": manual_skips,
+                                       "upload_skips": upload_skips,
                                        "tasks": report},
                                       ensure_ascii=False, indent=2), encoding="utf-8")
             log.info("=" * 62)
@@ -643,6 +741,12 @@ def main():
                 log.info(f"蓝圈新增 {gained} 个；本节变蓝: {turned or '无'}")
             if pc_only:
                 log.info(f"PC 端不支持、需在 App 端完成：{len(pc_only)} 项（已跳过，未浪费时长）")
+            if upload_skips:
+                log.info(f"需手动上传作品：{upload_skips} 项（已跳过）")
+            if manual_out_list or manual_skips:
+                log.info(f"三振出局（反复失败、需手动完成）：本轮出局 "
+                         f"{len(manual_out_list)} 项 / 缓存跳过 {manual_skips} 项"
+                         "（后续不再重做；--retry-manual 可重试）")
             if cached_skips:
                 log.info(f"断点续跑缓存直接跳过：{cached_skips} 项（连页面都没打开）")
             log.info(f"报告：{out}")
@@ -1019,19 +1123,34 @@ JS_QUIZ_STATE = r"""
         // ★ 题块 innerText 前一大段是页面导航（"教材名> 单元> Tab名"），
         //   直接截 320 字会把真正的题目挤掉，模型等于没看到题干。
         //   这里从 Directions/Question 开始切，并放宽到 2000 字。
+        //   ★ 超长时保头留尾：阅读题的长材料在前、真正的提问在后，
+        //   只截头部 2000 会把问题本身截掉——模型"看不懂题目"就答非所问。
         let t = (q.innerText || '').replace(/\s+/g, ' ').trim();
         const m = t.match(/Directions\s*[:：]|Question\s*[:：]/i);
         if (m && m.index > 0) t = t.slice(m.index);
         else t = t.replace(/^([^>]{0,60}>\s*)+/, '');
-        return t.slice(0, 2000);
+        if (t.length > 2000) t = t.slice(0, 700) + ' …… ' + t.slice(-1300);
+        return t;
       })(),
       material: (() => {
         // ★ 阅读/讨论题的材料（文章正文）在题块内的 material 区，
         //   不在题干里。不取出来模型就没有答题依据。
         const el = q.querySelector(
           '[class*="abs-material"], [class*="rich-text"], [class*="material"]');
-        if (!el) return '';
-        return (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
+        if (el) return (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
+        // class 猜不中时的兜底：向上找最近的祖先，看它的"非题块"子元素里
+        //   有没有大段文本（阅读材料通常和题块并排放在同一个 section）。
+        //   只取兄弟文本而不是祖先全文，避免混入其它题目的选项干扰模型。
+        let p = q.parentElement, d = 0;
+        while (p && d < 5) {
+          const extra = Array.from(p.children)
+            .filter(c => c !== q)
+            .map(c => (c.innerText || '').trim())
+            .join('\n').replace(/\s+/g, ' ').trim();
+          if (extra.length > 300) return extra.slice(0, 4000);
+          p = p.parentElement; d++;
+        }
+        return '';
       })(),
       options: opts.map((e, i) => {
         const key = gi + ':' + i;
@@ -1312,15 +1431,25 @@ def _load_bank():
     return _BANK_CACHE
 
 
-def _save_bank(leaf_id, letters, score, group_letters=None):
-    """沉淀标准答案，下次同题直接用，一次满分。"""
+def _save_bank(leaf_id, letters, score, group_letters=None, blocks=None):
+    """沉淀标准答案，下次同题直接用，一次满分。
+
+    ★ blocks 是按题/按空分组的答案（见 decrypt.parse_answer_blocks），
+      多题页必须靠它才能精确对应；letters 仅保留作旧格式兼容。
+    """
     try:
         bank = _load_bank()
-        bank[str(leaf_id)] = {"letters": list(letters), "score": score,
-                              "groups": group_letters or []}
+        entry = {"letters": list(letters), "score": score,
+                 "groups": group_letters or []}
+        if blocks:
+            entry["blocks"] = blocks
+        bank[str(leaf_id)] = entry
         _bank_path().parent.mkdir(parents=True, exist_ok=True)
         _bank_path().write_text(
             json.dumps(bank, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 关键：内存缓存也要更新，否则同一进程内后续叶子读到的还是旧题库
+        global _BANK_CACHE
+        _BANK_CACHE = bank
     except Exception:  # noqa: BLE001
         pass
 
@@ -1357,11 +1486,14 @@ def _apply_letters(page, log, groups, letters):
 
 
 def _fill_blanks(page, log, transcript="", std_answers=None, cfg=None,
-                 stem=""):
+                 stem="", bank_blocks=None):
     """填空：优先取题干里的 e.g. 示例；否则用音频转录夹逼。
 
     绝不填无意义的固定词（之前填 'often' 等于乱做）。
     实在定不下来就跳过，交给后面「提交→标准答案→重答」闭环兜底。
+
+    ★ bank_blocks 是按空位分组的标准答案（[[空1答案...], [空2答案...]]）。
+      数量与空位一致时按下标精确填入，避免扁平列表错位导致永远不满分。
     """
     from upc.hearing import answer_from_context
 
@@ -1392,15 +1524,30 @@ def _fill_blanks(page, log, transcript="", std_answers=None, cfg=None,
     #   实测会把顺序弄乱、还会重复（空5/空6 都填 being together），
     #   导致明明有标准答案却只有 0.333 / 0.667 分。
     known = []
-    if std_answers:
+    # ★ 首选：分组答案与空位一一对应（最精确，不会错位）
+    if bank_blocks and len(bank_blocks) == len(inputs):
+        known = [[b[0]] if isinstance(b, list) and b else
+                 ([str(b)] if b else []) for b in bank_blocks]
+        log.info(f"    填空题库命中(分组)，{len(known)} 组答案按空位精确对应")
+    elif std_answers:
         if len(std_answers) == len(inputs):
             known = [[a] for a in std_answers]
             log.info(f"    填空题库命中，{len(known)} 个答案按空位顺序直接对应")
         else:
-            from upc.hearing import group_by_position
-            known = group_by_position(list(std_answers), transcript or "")
-            log.info(f"    填空题库命中，答案 {len(std_answers)} 个 / 空 {len(inputs)} 个，"
-                     f"按音频定位分成 {len(known)} 组")
+            # 扁平答案数量对不上时，group_by_position 常把顺序弄乱。
+            # 若分组答案存在但数量不等，按最短长度逐个对齐，好过整体错位。
+            if bank_blocks:
+                n = min(len(bank_blocks), len(inputs))
+                known = [[b[0]] if isinstance(b, list) and b else []
+                         for b in bank_blocks[:n]]
+                known += [[] for _ in range(len(inputs) - n)]
+                log.info(f"    填空题库分组数({len(bank_blocks)})与空数"
+                         f"({len(inputs)})不等，按前 {n} 个对齐")
+            else:
+                from upc.hearing import group_by_position
+                known = group_by_position(list(std_answers), transcript or "")
+                log.info(f"    填空题库命中，答案 {len(std_answers)} 个 / 空 "
+                         f"{len(inputs)} 个，按音频定位分成 {len(known)} 组")
 
     # ★ 媒体=无 的纯文字填空页没有音频转录。以前整套取答案逻辑都挂在
     #   transcript 上（夹逼 / 大模型 / 试探词全都要它），结果 8 个空全跳过
@@ -1824,12 +1971,13 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
             info["total"] = max(info["total"], len(blanks))
             _bank0 = _load_bank().get(str(lf.get("id"))) or {}
             _bans0 = _bank0.get("letters") or []
+            _blocks0 = _bank0.get("blocks") or []
             _is_letter = (bool(_bans0) and
                           all(len(str(x)) == 1 and str(x).isalpha()
                               for x in _bans0))
             info["answered"] = _fill_blanks(
                 page, log, trans, None if _is_letter else (_bans0 or None),
-                cfg=cfg, stem=(scan.get("stem") or ""))
+                cfg=cfg, stem=(scan.get("stem") or ""), bank_blocks=_blocks0)
             log.info(f"    已填 {info['answered']}/{len(blanks)} 个空")
             if info["answered"] < len(blanks):
                 miss = len(blanks) - info["answered"]
@@ -1926,22 +2074,46 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
         if groups:
             log.info(f"    发现 {len(groups)} 个题块")
             unanswered = 0
+            # 题库只读一次；blocks 按题/按空分组，用于多题页精确对应
+            _bank_all = _load_bank().get(str(lf.get("id"))) or {}
+            _bank_blocks = _bank_all.get("blocks") or []
+            _blocks_match = (len(_bank_blocks) == len(groups) and
+                             all(isinstance(b, list) and b for b in _bank_blocks))
+            if _bank_blocks and not _blocks_match:
+                log.info(f"    题库分组数({len(_bank_blocks)})与题块数"
+                         f"({len(groups)})不等，退回逐题判断")
             for gi, g in enumerate(groups, 1):
                 texts = [o["text"] for o in g.get("options") or []]
                 cur = [i for i, o in enumerate(g.get("options") or [])
                        if o.get("selected")]
                 from upc.hearing import is_multi as _is_multi
-                qtype_multi = bool(_is_multi(g.get("stem", "")))
-                bank = _load_bank().get(str(lf.get("id"))) or {}
-                bank_letters = bank.get("letters") or []
+                _multi_hint = _is_multi(g.get("stem", ""))
+                qtype_multi = bool(_multi_hint)
+                bank_letters = _bank_all.get("letters") or []
                 # 只把「单个字母」当选择题答案；填空的文字答案走填空分支
                 if not all(len(str(x)) == 1 and str(x).isalpha()
                            for x in bank_letters):
                     bank_letters = []
-                if bank_letters:
-                    # 题库命中：直接用上次判分拿到的标准答案，一次满分。
+                # ★ 首选：该题的分组答案（多题页每题各自答案，不再张冠李戴）
+                block_letters = []
+                if _blocks_match:
+                    for _x in _bank_blocks[gi - 1]:
+                        _s = str(_x).strip().upper()
+                        if _s and _s[0].isalpha():
+                            block_letters.append(_s[0])
+                if block_letters:
+                    want = [ord(x) - 65 for x in block_letters]
+                    want = [i for i in want if 0 <= i < len(texts)]
+                    log.info(f"      题{gi} 题库分组命中，用标准答案 "
+                             f"{[chr(65 + i) for i in want]}")
+                elif bank_letters and not (len(groups) > 1
+                                           and len(bank_letters) != len(groups)):
+                    # 旧格式兜底：直接用上次判分拿到的扁平标准答案。
                     # 若答案数 == 题块数，说明是「每题一个答案」的多题页，
                     # 按题索引分配；否则是单题多选，整组字母都选。
+                    # ★ 多题页且答案数对不上 → 这串字母属于别的题，乱套到
+                    #   每道题上会出现"每题都全选"的连环错。宁可不用题库，
+                    #   落到下面的大模型分支重新答。
                     if len(groups) > 1 and len(bank_letters) == len(groups):
                         _one = bank_letters[gi - 1]
                         want = [ord(str(_one).upper()) - 65] \
@@ -1950,7 +2122,7 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                         want = [ord(x.upper()) - 65 for x in bank_letters
                                 if x and x[0].isalpha()]
                     want = [i for i in want if 0 <= i < len(texts)]
-                    log.info(f"      题{gi} 题库命中，用标准答案 "
+                    log.info(f"      题{gi} 题库命中(扁平)，用标准答案 "
                              f"{[chr(65 + i) for i in want]}")
                 elif texts:
                     # 优先交给大模型真读题（题干+选项+音频转录）。
@@ -1960,11 +2132,18 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                     _ans = None
                     _cli = _get_llm(cfg, log)
                     if _cli is not None:
-                        _mat = g.get("material") or ""
+                        # ★ 多题块页也要材料兜底：题块里没抓到材料时用
+                        #   整页文本（含阅读原文）——单题块页此前已有此逻辑，
+                        #   多题块页不给材料，模型只能瞎猜（"看不懂题目"）。
+                        _mat = (g.get("material") or "").strip() or _page_txt
                         if _mat:
                             log.info(f"      题{gi} 带上网页材料 {len(_mat)} 字符")
-                        _r = _cli.ask(g.get("stem", ""), texts,
-                                      "多选" if qtype_multi else "单选",
+                        # 关键词判不出单/多选时，让模型自己判断题型的措辞
+                        # （"Choose the items..."这类清单题被当成单选会只答一个）。
+                        _qtype = ("多选" if qtype_multi
+                                  else ("单选还是多选请读题干自行判断"
+                                        if _multi_hint is None else "单选"))
+                        _r = _cli.ask(g.get("stem", ""), texts, _qtype,
                                       transcript=trans, material=_mat)
                         if _r and _r.get("answer"):
                             _ans = _r["answer"]
@@ -1972,10 +2151,20 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                             # 以前用 [:1] 硬截，"ANSWER" 会被截成 "A"，
                             # 于是每道题都被选成 A —— 这正是"没看题就答"的来源。
                             _ls = []
-                            for x in _ans.replace("，", ",").split(","):
+                            for x in (_ans.replace("，", ",")
+                                      .replace("、", ",")
+                                      .replace(";", ",").replace("；", ",")
+                                      .split(",")):
                                 t = x.strip().upper().rstrip(".、)")
                                 if len(t) == 1 and "A" <= t <= "H":
                                     _ls.append(t)
+                            # 多选模型常不带分隔符连写（"ACE"）→ 按字符拆开；
+                            # 不拆的话答案解析为空、整题回退瞎猜。
+                            if len(_ls) < 2:
+                                _raw3 = str(_ans).strip().upper()
+                                if (2 <= len(_raw3) <= 8
+                                        and all("A" <= c <= "H" for c in _raw3)):
+                                    _ls = list(_raw3)
                             want = [ord(x) - 65 for x in _ls]
                             want = [i for i in want if 0 <= i < len(texts)]
                             if not want:
@@ -2140,7 +2329,8 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
             return info
 
         # ③ 提交 + 判分闭环
-        from upc.decrypt import parse_answers, first_answer_list
+        from upc.decrypt import (parse_answers, first_answer_list,
+                                 parse_answer_blocks)
 
         def _submit_once():
             """点一次提交，返回 (是否点到, data 字典)。"""
@@ -2213,6 +2403,27 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                     log.info(f"    现场已留存: {_f.name}")
                 except Exception:  # noqa: BLE001
                     pass
+                # ★ 文件上传题：平台要求上传作品文件（拖拽区），程序永远
+                #   补不上，每遍重做纯浪费时长。标记 needs_upload，
+                #   下一轮起像「App 端不支持」一样直接跳过，不再打开页面。
+                try:
+                    _upl = page.evaluate(r"""
+                    () => {
+                      const up = document.querySelector(
+                        '.question-multi-file-upload, [class*="file-upload"]');
+                      const done = up ? up.querySelector(
+                        '.ant-upload-list-item, [class*="upload-file"],'
+                        + ' [class*="media-list"] > *') : null;
+                      return { has: !!up, done: !!done,
+                               opts: document.querySelectorAll('.option').length };
+                    }""") or {}
+                except Exception:  # noqa: BLE001
+                    _upl = {}
+                if _upl.get("has") and not _upl.get("done") \
+                        and not _upl.get("opts"):
+                    info["needs_upload"] = True
+                    log.warning("    判定为「需上传作品」题型：程序无法代劳，"
+                                "已标记跳过；请在网页/App 端手动上传作品")
             j = box.get("j") or {}
             code = j.get("code")
             if code in (600001, 600002, "600001", "600002"):
@@ -2228,21 +2439,50 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
             return info
         score = None
         std_letters = []
+        std_blocks = []
         if data:
+            _analysis = data.get("analysis") or ""
+            _daykey = data.get("dayKey") or ""
             score = ((data.get("record_grade") or {}).get("scorePct"))
-            std_letters = first_answer_list(
-                parse_answers(data.get("analysis") or "", data.get("dayKey") or ""))
-            log.info(f"    判分：scorePct={score} 标准答案={std_letters}")
+            std_letters = first_answer_list(parse_answers(_analysis, _daykey))
+            std_blocks = parse_answer_blocks(_analysis, _daykey)
+            log.info(f"    判分：scorePct={score} 标准答案={std_letters} "
+                     f"分组={len(std_blocks)} 组")
 
         # 提交后页面进入 review 模式、控件锁定，无法当场改答案；
         # 选择题重进后连 .option 都不渲染。统一交给第二遍（--passes）
         # 用题库满分，这里只沉淀标准答案。
         # 注：之前试过「重进页面重答」，实测会卡死（22 分钟无输出），已废弃。
-        if std_letters:
-            _save_bank(lf.get("id"), std_letters, score)
-            if score != 1:
-                log.info(f"    首次 scorePct={score}，已记录标准答案；"
-                         f"第二遍按题库满分")
+        #
+        # ★ 不满分不覆盖题库：第二遍若已按题库满分(score=1)，
+        #   说明题库答案正确，保留；若重做仍不满分，说明题库里的旧答案
+        #   是错的，不要用它覆盖掉可能正确的旧答案，更不能把 score 记成
+        #   0/低分导致永远留在 low_ids 死循环。
+        if std_letters or std_blocks:
+            _old = (_load_bank().get(str(lf.get("id"))) or {})
+            _old_score = _old.get("score")
+            # 题库里是否已有可用答案（分组或扁平）
+            _has_old_answer = bool(_old.get("blocks")) or bool(_old.get("letters"))
+            # 写入条件：
+            #  ① 题库还没有可用答案（如坏条目被清空）→ 必须写入新答案；
+            #  ② 本次分数更高 → 用更好的答案覆盖；
+            #  ③ 本次满分 → 一定是标准答案，覆盖。
+            should_write = (not _has_old_answer) or (score is not None and
+                            (_old_score is None or score > _old_score)) \
+                            or (score == 1)
+            if should_write:
+                # ★ letters 字段只在「单题页」才用第一组答案填充；
+                #   多题页的第一组答案冒充扁平列表，第二遍会被当成
+                #   "每题都选这些字母"连环错位——多题页只信 blocks。
+                _flat = std_letters or (std_blocks[0]
+                                        if len(std_blocks) == 1 else [])
+                _save_bank(lf.get("id"), _flat,
+                           score if score is not None else _old_score,
+                           blocks=std_blocks)
+                log.info(f"    已写入题库（score={score}，{len(std_blocks)} 组答案）")
+            if score is not None and score != 1:
+                log.info(f"    本次 scorePct={score} 未满；"
+                         f"第二遍按题库分组答案补满分")
 
         # 多页题：点到的其实是「下一题」，说明后面还有一页，继续答
         if not data and submitted in ("下一题", "继续") and _depth < 6:
@@ -2410,18 +2650,60 @@ def _wake_wb(reason, detail, rc):
         return None
 
 
-if __name__ == "__main__":
-    # 所有"程序自己解决不了"的出口（main 返回非 0 / 未捕获异常）统一唤起
-    # WorkBuddy 判断；用户主动 Ctrl+C 和正常结束不打扰。
+def _expand_book_all(argv):
+    """把 --book all 展开成「逐本执行」方案。
+
+    返回 (改写后的 argv, 待跑书目列表)。非 all 时书目只有一项 None
+    （argv 原样、走单本老路径）。两本书各跑一个完整 main()：
+    互相独立的 state / 浏览器上下文，第一本异常中断就不连坐第二本。
+    """
+    argv = list(argv)
+    if "--book" not in argv:
+        return argv, None
+    i = argv.index("--book")
+    if i + 1 >= len(argv) or argv[i + 1] != "all":
+        return argv, None
+    books = list(BOOK_KEY)  # vls 视听说 → rw 读写，按定义顺序
+    argv[i + 1] = books[0]
+    return argv, books
+
+
+def _run_cli():
+    """单次 main() 的完整异常链，返回进程退出码。"""
     try:
         _rc = main()
     except KeyboardInterrupt:
-        raise SystemExit(130)
-    except SystemExit:
-        raise
+        return 130
+    except SystemExit as _e:
+        try:
+            return int(_e.code or 0)
+        except (TypeError, ValueError):
+            return 1
     except BaseException as _exc:  # noqa: BLE001
         _wake_wb("刷课主程序未捕获异常", f"{type(_exc).__name__}: {_exc}", 1)
-        raise
+        return 1
     if _rc:
         _wake_wb("刷课程序没能跑完", f"main() 返回 {_rc}；请结合最近日志判断原因", _rc)
+    return _rc
+
+
+if __name__ == "__main__":
+    # 所有"程序自己解决不了"的出口（main 返回非 0 / 未捕获异常）统一唤起
+    # WorkBuddy 判断；用户主动 Ctrl+C 和正常结束不打扰。
+    # --book all：串行跑完全部教材（视听说 → 读写）。
+    _argv, _books = _expand_book_all(sys.argv)
+    if not _books:
+        raise SystemExit(_run_cli())
+    _rc = 0
+    for _bk in _books:
+        if _bk != _books[0]:
+            print(f"\n{'=' * 62}\n第一本处理完毕，切换教材继续："
+                  f"{_bk}（{len(_books)} 本中的第 {_books.index(_bk) + 1} 本）\n{'=' * 62}")
+        _argv[_argv.index("--book") + 1] = _bk
+        sys.argv = _argv
+        _rc = _run_cli()
+        # 中断 / Ctrl+C / 异常（130、1、2 等）就不跑第二本：
+        # 多半是登录态或平台问题，连坐只是重复白跑
+        if _rc != 0:
+            break
     raise SystemExit(_rc)

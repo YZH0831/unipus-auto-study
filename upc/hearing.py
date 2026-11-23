@@ -69,7 +69,11 @@ def is_multi(stem: str) -> bool:
                    # 实测：选出"被提到的方面/陈述"这类题都是多选
                    "aspects", "choose the aspects", "mentioned",
                    "choose the statements", "statements that are",
-                   "choose the topics", "topics that are")
+                   "choose the topics", "topics that are",
+                   # 实测（Unit 1 Group discussion）：清单确认题也是多选
+                   # "Choose the items that you have confirmed."
+                   "choose the items", "select the items", "items that you",
+                   "items that are", "check the items", "tick the items")
     single_hints = ("choose the best", "best answer", "correct answer",
                     "choose the correct one", "which of the following is")
     if any(k in s for k in multi_hints):

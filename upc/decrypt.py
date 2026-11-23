@@ -95,6 +95,77 @@ def first_answer_list(answers_map):
             return v["answers"]
     return []
 
+
+def parse_answer_blocks(analysis_cipher, day_key):
+    """按题目/空位分组解析标准答案，解决多题页只存第一题的问题。
+
+    analysis 明文里每个 item 是一道 quesId，item.answer 是 JSON 串，
+    其中 children[*].answers 是该题各空/各子问的答案。返回：
+
+        [
+          ["A", "C"],          # 第 1 题(或第 1 组)的答案
+          ["B"],               # 第 2 题的答案
+          ...
+        ]
+
+    每个 block 就是一道题/一个空的候选答案（可能多个同义写法）。
+    这样重做时能按下标精确对应，而不再把多题答案压成一个扁平列表。
+    解析不出返回 []。
+    """
+    plain = decrypt(analysis_cipher, day_key)
+    if not plain:
+        return []
+    try:
+        items = json.loads(plain)
+    except Exception:  # noqa: BLE001
+        return []
+    blocks = []
+    for it in items if isinstance(items, list) else []:
+        raw = it.get("answer")
+        obj = None
+        if isinstance(raw, str) and raw.strip():
+            try:
+                obj = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                obj = None
+        elif isinstance(raw, dict):
+            obj = raw
+        group = []
+        if isinstance(obj, dict):
+            children = obj.get("children") or []
+            for child in children:
+                a = child.get("answers")
+                if isinstance(a, list):
+                    vals = [str(x).strip() for x in a if str(x).strip()]
+                elif isinstance(a, str) and a.strip():
+                    vals = [a.strip()]
+                else:
+                    vals = []
+                if vals:
+                    group.append(vals)
+            if not group:
+                a = obj.get("answers")
+                if isinstance(a, list):
+                    group = [[str(x).strip() for x in a if str(x).strip()]]
+        elif isinstance(obj, list):
+            for a in obj:
+                if isinstance(a, list):
+                    vals = [str(x).strip() for x in a if str(x).strip()]
+                elif isinstance(a, str) and a.strip():
+                    vals = [a.strip()]
+                else:
+                    vals = []
+                if vals:
+                    group.append(vals)
+        if not group and isinstance(it.get("answers"), list):
+            vals = [str(x).strip() for x in it["answers"] if str(x).strip()]
+            if vals:
+                group = [vals]
+        # 单题单组：group 就是该题答案列表 → 作为一个 block；
+        # 单题多组(children 多个)：每个 child 是一个独立的空 → 各自成 block。
+        blocks.extend(group)
+    return blocks
+
 def parse_sequence_order(analysis_cipher, day_key):
     """解析排序/人物匹配题的标准答案。
 

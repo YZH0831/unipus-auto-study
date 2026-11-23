@@ -109,12 +109,13 @@ DEFAULTS = {
     # ------------------------------------------------------- 单元测试 / 答题
     "quiz": {
         "enabled": True,
-        # sniff   ：试答→嗅探接口返回的正确答案→回填重答（无需题库，命中率高）
-        # cache   ：只用本地题库，不试答（最保守，不会占一次作答记录）
-        # llm     ：直接调大模型作答
-        # hybrid  ：cache → llm → sniff 逐级回退
+        # ★ 现状（2026-11-23 审计对齐）：strategy/two_pass 在本链路
+        #   （upc/runner.py + upc/quiz.py）只影响展示，答题固定为
+        #   本地题库 → 大模型 → 兜底；sniff 试答与第二遍重做均未实现。
+        #   真正的两遍满分刷在 AI 版链路：tools/study_ai.py --passes 2
+        #   （第一遍交卷后解密判题接口拿标准答案，第二遍按题库满分）。
         "strategy": "hybrid",
-        "two_pass": True,           # 第一遍交卷拿答案，第二遍按正确答案重做
+        "two_pass": True,           # 预留项（本链路未实现，见上）
         "max_questions": 0,         # 0=不限
         "answer_delay_ms": [400, 1200],
         "submit_confirm": True,     # 点提交后若弹确认框自动确定
@@ -129,6 +130,11 @@ DEFAULTS = {
             "timeout_s": 30,
             "temperature": 0,
             "max_calls": 200,
+            # 二次复核（程序自主判断）：置信低/输出可疑时，再唤起一次 DeepSeek 独立作答。
+            # 两次一致→提置信采纳；冲突→保留首答并降置信交嗅探兜底。高置信题直接放行，省 API。
+            "recheck_enabled": True,
+            "recheck_below": 0.80,
+            "max_rechecks": 40,
         },
         # ---- 第三方题库（可选）----
         "tiku": {

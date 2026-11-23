@@ -23,6 +23,21 @@ from . import selectors as S
 from .sniff import ResponseSniffer
 
 
+def _llm_suspicious(raw):
+    """二次复核的信号之一：模型输出含占位符/空壳/超短答案，判为可疑。"""
+    s = str(raw or "").strip()
+    if not s:
+        return True
+    if re.search(r"<\s*(答案|answer)\s*>|placeholder|不知道|无法判断|不确定答案", s,
+                 re.IGNORECASE):
+        return True
+    # 只有置信度行、没有实质答案
+    lines = [x for x in s.splitlines() if x.strip()]
+    if not lines:
+        return True
+    return len(lines) == 1 and bool(re.match(r"\s*CONF\s*[:：]", lines[0], re.IGNORECASE))
+
+
 # ---------------------------------------------------------------------------
 # 扫描：从 input 反推题目结构，并给元素打上定位标记
 # ---------------------------------------------------------------------------
@@ -261,6 +276,7 @@ class QuizSolver:
             if not self.llm.available:
                 self.log.info("大模型未配置 api_key，跳过 LLM 答题")
                 self.llm = None
+        self.rechecks = 0
         self.solved = 0
         self.failed = 0
 
@@ -311,14 +327,52 @@ class QuizSolver:
         if cached:
             return cached, "cache", 0.95
 
-        # ② 大模型
+        # ② 大模型 + 程序自主判断的二次复核
         if self.llm is not None and self.llm.available:
+            from .llm import RECHECK_SYSTEM_PROMPT
             opts = [o.get("full") or o.get("text", "") for o in q.options] or None
             got = self.llm.ask(q.stem, opts, q.qtype)
             if got:
-                return got["answer"], "llm", 0.7
+                conf = float(got.get("confidence", 0.7) or 0.7)
+                llm_cfg = self.cfg.quiz.get("llm", {}) or {}
+                need, why = self._should_recheck(conf, got, llm_cfg)
+                if need:
+                    self.rechecks += 1
+                    # 换独立复核视角再唤起一次 DeepSeek
+                    got2 = self.llm.ask(q.stem, opts, q.qtype,
+                                        system=RECHECK_SYSTEM_PROMPT)
+                    if got2:
+                        conf2 = float(got2.get("confidence", 0.7) or 0.7)
+                        same = self.llm._same_answer(got["answer"], got2["answer"])
+                        if same:
+                            boosted = max(conf, conf2, 0.85)
+                            self.log.info(f"    二次复核一致（{why}）→ {got['answer']}"
+                                          f"（置信 {conf:.2f}→{boosted:.2f}）")
+                            return got["answer"], "llm复核一致", boosted
+                        # 冲突：不擅自选边，降置信交后续嗅探/兜底机制纠正
+                        self.log.warning(f"    二次复核冲突：首答 {got['answer']} / "
+                                         f"复核 {got2['answer']} → 保留首答并降置信")
+                        return got["answer"], "llm复核冲突", min(conf, 0.5)
+                    self.log.info(f"    二次复核调用失败，保留首答（{why}）")
+                return got["answer"], "llm", conf
 
         return None, "", 0.0
+
+    def _should_recheck(self, conf, got, llm_cfg):
+        """程序自主判断：置信低 / 输出可疑时才二次唤起 DeepSeek，省 API。"""
+        if not bool(llm_cfg.get("recheck_enabled", True)):
+            return False, "复核已关闭"
+        if self.rechecks >= int(llm_cfg.get("max_rechecks", 40) or 0):
+            return False, "复核次数已用尽"
+        below = float(llm_cfg.get("recheck_below", 0.80) or 0)
+        # 信号1：模型输出里带可疑标记（占位符类、超短答案）
+        raw = str(got.get("raw", ""))
+        if _llm_suspicious(raw):
+            return True, "模型输出可疑"
+        # 信号2：自报置信低于阈值
+        if conf < below:
+            return True, f"置信 {conf:.2f} < {below:.2f}"
+        return False, "高置信，无需复核"
 
     # ------------------------------------------------------------------
     def fill(self, page, q, answer):
@@ -509,12 +563,19 @@ class QuizSolver:
         learned = 0
         if got and got.get("answer"):
             self.log.info(f"    嗅探到答案: {got['answer']}（{got.get('from')}）")
-        # 把 DOM 里按顺序出现的答案对到题上（最朴素的顺序对齐）
-        if dom_answers and len(dom_answers) >= 1:
-            for i, q in enumerate(questions):
-                if i < len(dom_answers):
-                    self.store.put(q.key, dom_answers[i], "feedback", q.stem)
-                    learned += 1
+        # ★ 2026-11-23 防污染：停用多题页的 DOM 顺序对齐回填。
+        #   旧实现把 dom_answers[i] 按出现顺序硬对到 questions[i]——只要有一道
+        #   题没有反馈行、或页面多出一行"答案"文本，其后所有题就会整体错位入库；
+        #   且 AnswerStore 无分级校验，cache 命中即以 0.95 置信直接使用，
+        #   错答案等于永久污染题库。只保留单题页回填（唯一题目与
+        #   dom_answers[0] 天然对应，无错位风险）；多题页的可靠答案获取
+        #   走 AI 版链路 tools/study_ai.py 的解密判题（parse_answer_blocks 按题分组）。
+        if dom_answers and len(questions) == 1:
+            self.store.put(questions[0].key, dom_answers[0], "feedback", questions[0].stem)
+            learned += 1
+        elif dom_answers and len(questions) > 1:
+            self.log.info(f"    多题页 DOM 反馈 {len(dom_answers)} 条与 {len(questions)} "
+                          f"道题无法可靠对应，跳过回填（防错位污染题库）")
         if got and len(questions) == 1:
             self.store.put(questions[0].key, got["answer"], "sniff", questions[0].stem)
             learned += 1
@@ -524,6 +585,24 @@ class QuizSolver:
         return {"questions": len(questions), "answered": answered,
                 "submitted": submitted, "learned": learned,
                 "feedback": dom_answers, "sniffed": got}
+
+    # 主观题兜底句池（2026-11-23）：旧版所有 essay 一律填同一句
+    # "I think this is an important topic in our daily life."，全平台文本雷同，
+    # 是典型机器作答特征（反作弊侧一个 GROUP BY 就能圈出来），改随机句池 + 随机尾句。
+    _FILL_POOL = ("the", "a", "to", "in", "on", "it")
+    _ESSAY_POOL = (
+        "In my opinion, this is quite an interesting topic worth thinking about.",
+        "I believe different people may hold different views on this question.",
+        "From my perspective, it reminds me of some similar experiences in daily life.",
+        "As far as I am concerned, we should think carefully before drawing a conclusion.",
+        "This topic is closely related to what we have discussed in this unit.",
+        "To be honest, I have never thought about this question before, but it sounds meaningful.",
+    )
+    _ESSAY_TAILS = (
+        " Thanks for reading.",
+        " That is all I want to say.",
+        " I would be glad to hear other opinions.",
+    )
 
     def _fallback_answer(self, q):
         """兜底：绝不留空（留空会被平台拦截"还有 X 题未作答"）。"""
@@ -535,7 +614,10 @@ class QuizSolver:
             picks = random.sample([chr(ord("A") + i) for i in range(n)], min(k, n))
             return ",".join(sorted(picks))
         if q.qtype == "fill":
-            return "the"
+            return random.choice(self._FILL_POOL)
         if q.qtype == "essay":
-            return "I think this is an important topic in our daily life."
+            s = random.choice(self._ESSAY_POOL)
+            if random.random() < 0.35:
+                s += random.choice(self._ESSAY_TAILS)
+            return s
         return "A"

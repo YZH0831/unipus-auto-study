@@ -22,6 +22,9 @@ logs/
 output/
 dist/
 *.log
+# 备份文件（.bak / .bak_时间戳 / .bak-日期），一律不入库
+*.bak
+*.bak_*
 
 # ---- 保留空目录 ----
 !data/.gitkeep

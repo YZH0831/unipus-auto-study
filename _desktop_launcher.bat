@@ -2,7 +2,9 @@
 chcp 936 >nul
 title U校园自动化助手
 rem ============================================================
-rem  桌面唯一入口：双击 = 直接打开面板窗口（独立窗口，无地址栏/标签页/黑框）
+rem  桌面唯一入口：双击 = 直接打开面板窗口（Edge/Chrome 应用模式，
+rem  独立窗口、无地址栏/标签页；cmd 黑框会闪现约半秒后自动消失，
+rem  这是 .bat 形式固有的启动闪现，不会残留）。
 rem  命令行参数：run = 直接 AI 刷课；doctor / ai / pick / list / probe ...
 rem              原样透传给项目里的 start.bat
 rem  真正逻辑在 tools/ui_server.py 与 start.bat，本文件只负责跳转。
@@ -68,7 +70,10 @@ echo [!] 缺 pythonw.exe，退回控制台模式（关掉这个黑框即停止面板）
 set "RC=%ERRORLEVEL%"
 
 :check
-rem 正常结束 / 用户主动中断 → 直接退出，不误唤起兜底
+rem 退出码语义（与 tools/study_ai.py 末尾的 _wake_wb 配套，避免双层重复弹）：
+rem   0 = 正常结束；130 / -1073741510 / 3221225786 = 用户主动中断（Ctrl+C/关窗）
+rem   1 / 2 = Python 端已经自己唤起过 WorkBuddy 兜底，bat 层不再重复弹
+rem   其余  = 没人处理过的异常 → 由 bat 层兜底唤起（有 10 分钟节流）
 if "%RC%"=="0" goto finish
 if "%RC%"=="1" goto finish
 if "%RC%"=="2" goto finish
