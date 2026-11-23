@@ -40,6 +40,7 @@ PROGRESS_FILE = STATE_DIR / "progress.json"
 DEFAULT_PREFS = {
     "auto_start": False, "minutes": 60, "passes": 2,
     "book": "all", "unit": "", "micro": "", "redo": False,
+    "retry_manual": False,
 }
 PREF_KEYS = tuple(DEFAULT_PREFS)
 # 单例识别标记：/api/health 里回报，用于区分"本项目的面板"和其它本地服务
@@ -225,6 +226,7 @@ def start_study(opts: dict) -> dict:
         if unit and micro:
             return {"ok": False, "msg": "Unit 和节名二选一即可"}
         redo = bool(opts.get("redo"))
+        retry_manual = bool(opts.get("retry_manual"))
 
         cmd = [sys.executable, "-u", "tools/study_ai.py",
                "--minutes", f"{minutes:g}", "--passes", str(passes),
@@ -235,6 +237,8 @@ def start_study(opts: dict) -> dict:
             cmd += ["--micro", micro]
         if redo:
             cmd += ["--redo"]
+        if retry_manual:
+            cmd += ["--retry-manual"]
 
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         if _stdout_fp:
@@ -310,6 +314,7 @@ def save_prefs(opts: dict) -> dict:
                  else "all")
     p["auto_start"] = bool(p.get("auto_start"))
     p["redo"] = bool(p.get("redo"))
+    p["retry_manual"] = bool(p.get("retry_manual"))
     _write_json(PREFS_FILE, p)
     return {"ok": True, "prefs": p}
 

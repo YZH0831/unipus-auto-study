@@ -273,6 +273,8 @@ td{color:var(--txt)} td.mono{font-family:var(--mono);color:var(--muted);font-siz
           </div>
           <label class="switch"><input type="checkbox" id="fRedo"><span class="track"></span>
             连已完成的节也重做</label>
+          <label class="switch"><input type="checkbox" id="fRetryManual"><span class="track"></span>
+            重试「需人工」项（修复题型后勾上，让三振出局的项再跑一次）</label>
         </div>
 
         <div class="card">
@@ -453,6 +455,7 @@ td{color:var(--txt)} td.mono{font-family:var(--mono);color:var(--muted);font-siz
     $("#fUnit").value = p.unit || "";
     $("#fMicro").value = p.micro || "";
     $("#fRedo").checked = !!p.redo;
+    $("#fRetryManual").checked = !!p.retry_manual;
     $("#uAuto").checked = !!p.auto_start;
     updatePreview();
   }
@@ -485,7 +488,8 @@ td{color:var(--txt)} td.mono{font-family:var(--mono);color:var(--muted);font-siz
       book: $("#fBook").value,
       unit: $("#fUnit").value.trim(),
       micro: $("#fMicro").value.trim(),
-      redo: $("#fRedo").checked
+      redo: $("#fRedo").checked,
+      retry_manual: $("#fRetryManual").checked
     };
   }
   function updatePreview(){
@@ -494,9 +498,10 @@ td{color:var(--txt)} td.mono{font-family:var(--mono);color:var(--muted);font-siz
     if(o.unit) s += " --unit " + o.unit;
     if(o.micro) s += " --micro " + o.micro;
     if(o.redo) s += " --redo";
+    if(o.retry_manual) s += " --retry-manual";
     $("#cmdPreview").textContent = s;
   }
-  ["#fMinutes","#fPasses","#fBook","#fUnit","#fMicro","#fRedo"].forEach(sel=>{
+  ["#fMinutes","#fPasses","#fBook","#fUnit","#fMicro","#fRedo","#fRetryManual"].forEach(sel=>{
     const el=$(sel); el.addEventListener("input",updatePreview); el.addEventListener("change",updatePreview);
   });
 

@@ -512,6 +512,30 @@ def t_selector_no_dupes():
             assert len(val) == len(set(val)), f"{name} 里有重复选择器"
 
 
+def t_scoop_parse_real_page():
+    """真实现场 HTML：6 个 do/make 下拉空必须全部识别。"""
+    import json
+    from upc import scoop
+    p = ROOT / "output" / "unknown_6654be8010310bf.json"
+    if not p.exists():
+        return  # 现场文件可能不在分发包里，跳过
+    html = json.loads(p.read_text(encoding="utf-8")).get("html", "")
+    scoops = scoop.parse_scoops_from_html(html)
+    assert len(scoops) == 6, f"应识别 6 个下拉空，实际 {len(scoops)}"
+    assert all(s["options"] == ["do", "make"] for s in scoops), scoops
+
+
+def t_scoop_llm_only_from_options():
+    """大模型答案只能取候选词，非法/越界答案要被丢弃。"""
+    from upc import scoop
+    scoops = [{"index": "0", "options": ["do", "make"]},
+              {"index": "1", "options": ["do", "make"]}]
+    got = scoop.parse_llm_answers("do|随便写的词", scoops)
+    assert got == ["do", ""], got
+    got2 = scoop.parse_llm_answers("答案：make | do", scoops)
+    assert got2 == ["make", "do"], got2
+
+
 def main():
     print("=" * 60)
     print("离线单元测试")
@@ -557,6 +581,10 @@ def main():
     check("口语录音按音频全长", t_voice_recording_length)
     check("开放式问答不写死answer", t_openq_no_answer_literal)
     check("选择器无重复", t_selector_no_dupes)
+
+    print("\n[下拉填空题]")
+    check("真实页面下拉空识别", t_scoop_parse_real_page)
+    check("下拉答案只取候选词", t_scoop_llm_only_from_options)
 
     print("\n" + "=" * 60)
     total = PASS + FAIL

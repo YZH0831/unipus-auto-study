@@ -596,8 +596,13 @@ def main():
                 #   满 3 振标记 needs_manual，后续轮次连页面都不再打开。
                 manual_out = False
                 if not pc_skip and not up_skip:
+                    # 未识别题型但"标记已看"成功 → 平台已给 pass，不再计失败/
+                    # 三振（自评表 Got it/Review、词卡浏览页都属于这类）。
+                    _seen_ok = bool(quiz_info and quiz_info.get("mark_seen")
+                                    and (quiz_info.get("unrecognized")
+                                         or quiz_info.get("submitted") == "标记已看"))
                     quiz_failed = bool(
-                        quiz_info and (
+                        quiz_info and not _seen_ok and (
                             quiz_info.get("unrecognized")   # 题型识别不了（人物匹配等）
                             or quiz_info.get("incomplete")  # 平台拦「还有未作答」
                             or quiz_info.get("unanswered")  # 存在未作答题块
@@ -2016,6 +2021,54 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
             info["answered"] = info.get("answered", 0) + _openq_n
             info["total"] = max(info.get("total", 0), _openq_n)
 
+        # ①c 下拉选词填空（fe-scoop）：选项藏在 DOM 里，过去整页判"未识别"
+        #     直接三振出局（读写教程 Collocation 的 do/make 就是这类）。
+        try:
+            from upc import scoop as _scoop
+            _scoops = page.evaluate(_scoop.JS_SCAN_SCOOPS) or []
+            if _scoops:
+                log.info(f"    下拉选词填空：发现 {len(_scoops)} 个空")
+                info["total"] = max(info.get("total", 0), len(_scoops))
+                _cli_s = _get_llm(cfg, log)
+                _answers = []
+                if _cli_s is not None:
+                    _prompt = _scoop.build_llm_prompt(
+                        _scoops, page_text=_openq_page_text)
+                    _r = _cli_s.ask(_prompt, None, "下拉选词")
+                    _answers = _scoop.parse_llm_answers(
+                        (_r or {}).get("answer", ""), _scoops)
+                    log.info(f"    下拉填空大模型作答 "
+                             f"{sum(1 for a in _answers if a)}/{len(_scoops)} 个空")
+                # 题库已有该题分组答案则优先用（提交判分后沉淀）
+                _bank_s = _load_bank().get(str(lf.get("id"))) or {}
+                _sbench = _bank_s.get("blocks") or []
+                if not _answers and len(_sbench) == len(_scoops):
+                    _answers = [str(b[0]).strip() if isinstance(b, list) and b else ""
+                                for b in _sbench]
+                    log.info("    下拉填空题库命中(分组)")
+                _picked = 0
+                for _s, _ans in zip(_scoops, _answers):
+                    if not _ans:
+                        continue
+                    try:
+                        page.evaluate(_scoop.JS_OPEN_SCOOP, str(_s["index"]))
+                        page.wait_for_timeout(350)
+                        _r2 = page.evaluate(_scoop.JS_PICK_SCOOP,
+                                            str(_s["index"]), _ans)
+                        if _r2 and _r2.get("ok"):
+                            _picked += 1
+                            page.wait_for_timeout(200)
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug(f"    下拉空{_s['index']} 选择失败: {str(exc)[:60]}")
+                info["scoop"] = _picked
+                info["answered"] = info.get("answered", 0) + _picked
+                if _picked < len(_scoops):
+                    info["unfinished_blanks"] = (info.get("unfinished_blanks", 0)
+                                                 + len(_scoops) - _picked)
+                    log.warning(f"    下拉填空还有 {len(_scoops) - _picked} 个空没选上")
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"    下拉选词填空处理异常: {str(exc)[:80]}")
+
         # ② 客观选择题：按题块 + 听力转录判断答案（不再全选）
         from upc.hearing import decide as _decide
 
@@ -2329,8 +2382,9 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
             try:
                 from upc import mark_seen as _MS3
                 if _MS3.mark_seen(page, log, lf.get("id")):
-                    log.info("    已尝试标记已看（未点提交）")
+                    log.info("    未识别题型已用「标记已看」完成 ✓")
                     info["mark_seen"] = True
+                    info["submitted"] = "标记已看"
             except Exception:  # noqa: BLE001
                 pass
             return info
