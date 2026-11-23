@@ -161,7 +161,7 @@ def build_state() -> dict:
     try:
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     except Exception:  # noqa: BLE001
-        version = "1.0.0"
+        version = "1.1.0"
     lp = latest_log()
     return {
         "running": running,

@@ -171,7 +171,7 @@ if /i "%~1"=="probe"  goto probe
 :menu
 set "VER="
 if exist "VERSION" set /p VER=<VERSION
-if not defined VER set "VER=1.0.0"
+if not defined VER set "VER=1.1.0"
 set "LLMSTAT="
 set "ST="
 set "MODEL="

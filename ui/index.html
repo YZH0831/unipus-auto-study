@@ -224,7 +224,7 @@ td{color:var(--txt)} td.mono{font-family:var(--mono);color:var(--muted);font-siz
         </svg>
       </div>
       <div>
-        <h1>U校园自动化助手 <span class="ver" id="ver">v1.0.0</span></h1>
+        <h1>U校园自动化助手 <span class="ver" id="ver">v1.1.0</span></h1>
         <div class="sub">真实浏览器学习 · 自动答题 · 断点续跑</div>
       </div>
     </div>
@@ -421,7 +421,7 @@ td{color:var(--txt)} td.mono{font-family:var(--mono);color:var(--muted);font-siz
   /* ---------- 状态渲染 ---------- */
   function renderState(s){
     state = s;
-    $("#ver").textContent = "v" + (s.version || "1.0.0");
+    $("#ver").textContent = "v" + (s.version || "1.1.0");
     const pill = $("#pill");
     pill.className = "pill " + (s.running ? "on" : (s.last_rc && s.last_rc !== 0 ? "err" : "off"));
     $("#pillText").textContent = s.running
