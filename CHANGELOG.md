@@ -1,5 +1,40 @@
 # 更新日志
 
+## v1.1.3 — 2026-11-25
+
+不再对「真播重做也点不亮」的节白耗时长（`tools/study_ai.py`、`upc/runstate.py`）。
+
+### 问题
+
+用户反馈「界面卡住不动」。实际是主流程的自适应回退：某节叶子全做完、
+目录圈仍是白的，就把整节按真实播放（1.0x、不拖动进度条）重做一遍，
+一节要 1.5~16 分钟——单是 Reading comprehension 里那段 408s 视频
+就要原地播 6 分 48 秒，看起来就像死机。
+
+### 根因
+
+`adaptive` 模式的回退从来没成功过：2026-11-23 ~ 11-25 的日志里
+**回退 34 次、点亮 0 次**。圈白与播放方式无关——白圈的这几节末尾是
+
+- `Discussion`（讨论页）：程序只做「标记已看」（不往讨论区发内容），
+  平台不把标记已看算进节完成度；
+- `Review & check`：自评表页（`tab_type=check`），同理。
+
+### 改动
+
+- 新增闸门：节末叶子是 `discussion` / `check` 时，判定「这节点不亮」，
+  直接跳过真播重做，并在收尾提示里写明「只能手动去讨论区发一帖」。
+- 新增本地记账：真播重做后圈仍未蓝的节，写进 `state/progress.json`
+  的 `micros` 段（TTL 同 `resume.ttl_days`，默认 7 天），后续轮次不再重做。
+  新增 `--retry-burn-reset` 可清空这批记录（平台改版后想再试一次）。
+- `RunState.mark()` 落盘时保留 `micros` 段，不会被单叶状态覆盖。
+
+### 测试
+
+- 新增 `tests/test_retry_burn.py`（5 项：落盘/重载/复位、enabled=False、
+  闸门顺序、收尾文案）；`test_offline.py` 29/29、`test_selfheal_fix.py` 10/10、
+  `test_voice_score_report.py` 6/6 通过；`py_compile` OK。
+
 ## v1.1.2 — 2026-11-25
 
 让口语题的 SOE 语音评测分数在日志与报告中清晰可见（`tools/study_ai.py`）。

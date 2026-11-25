@@ -175,6 +175,9 @@ def main():
     ap.add_argument("--retry-manual", action="store_true",
                     help="解除全部「三振出局」标记，让反复失败的叶子重新尝试"
                          "（修好新题型后用；再失败会很快重新出局）")
+    ap.add_argument("--retry-burn-reset", action="store_true",
+                    help="清空「整节真播重做也点不亮」的本地记录，"
+                         "让这些节下次重新回退重做一次（平台改版后用）")
     args = ap.parse_args()
 
     from upc import video as V
@@ -202,6 +205,13 @@ def main():
         if getattr(args, "retry_manual", False):
             _n = state.reset_manual()
             log.info(f"[--retry-manual] 已解除 {_n} 个三振出局标记，本轮重新尝试")
+        if getattr(args, "retry_burn_reset", False):
+            _b = state.reset_retry_burns()
+            log.info(f"[--retry-burn-reset] 已清空 {_b} 个"
+                     "「真播重做也点不亮」的节记录")
+        if state.burned_count:
+            log.info(f"本地记录：{state.burned_count} 个节确认过"
+                     "「真播重做点不亮」，本轮不再回退重做（省时长）")
         # 历史失败现场（unknown_/incomplete_ dump）预置 2 振：
         # 这些叶子反复重做过仍不 pass，再失败 1 次即出局，不再无限重做
         state.seed_fails_from_dumps(ROOT / "output", log)
@@ -500,6 +510,9 @@ def main():
             report = []
             # 含「PC 端不支持」项的 micro：整节不要因白圈而回退重放
             unsupported_micros = set()
+            # 「叶子全做完、圈仍不蓝」且真播重做救不回来的 micro：
+            # 区别只为把收尾提示写准（这类节要手动去讨论区发一帖才会变蓝）
+            white_blocked = set()
             # 连续打不开页面的叶子数：达到阈值就判定白屏/登录态失效，停止空转
             consecutive_failures = 0
             # 预先算好每个 micro 的最后一个叶子序号
@@ -686,32 +699,67 @@ def main():
 
                 # 自适应回退：**只在整节做完**且圈仍是白的时候才回退。
                 # 单个叶子没变蓝是正常的，回退没有意义（已实测）。
+                # ★ 再加一道闸：同一节以前回退过、圈仍没蓝（本地记着），
+                #   就不再白耗 1.5~16 分钟。实测 2026-11-23~25 共 34 次回退、
+                #   点亮 0 次——圈白不是「播放不真实」造成的，而是这些节的末尾
+                #   是讨论页（只能标记已看）/ 自评表（Review & check），
+                #   平台压根不把它算进节完成度，怎么重做都不会蓝。
+                _mkey = lf.get("micro_id") or f"{lf.get('unit')}|{lf.get('micro')}"
                 retried = False
                 if (args.mode == "adaptive" and args.verify and fast
                         and is_last and micro_now is False
                         and midx not in unsupported_micros):
-                    log.info(f"  → 整节「{lf.get('micro')}」仍是白圈，回退真实播放重做本节")
-                    # 把本节所有叶子按真实播放再走一遍
-                    for lf2 in content:
-                        if lf2.get("micro_idx") != midx:
-                            continue
-                        u2 = COURSEWARE.format(cid=cid, inst=inst, path=lf2["path"])
-                        try:
-                            page.goto("about:blank", timeout=15000)
-                            page.goto(u2, wait_until="domcontentloaded", timeout=50000)
-                            page.wait_for_timeout(5000)
-                            popup.sweep(page, rounds=1)
-                            _play_media(session, cfg, log, page, popup, humanizer,
-                                        V, args.video_max_min, rate=1.0, seek=False)
-                            _dwell(session, cfg, log, page, args.real_dwell,
-                                   popup, humanizer)
-                        except Exception as exc:  # noqa: BLE001
-                            log.warning(f"    回退中某项失败: {str(exc)[:70]}")
-                    retried = True
-                    micro_now = PG.micro_done(page, midx)
-                    blue_delta, blue_total = PG.verify(page, before_blue, wait_s=3.0)
-                    micro_turned = bool(micro_now) and before_micro is False
-                    log.info(f"    回退后本节: {'蓝圈 ✓' if micro_now else '仍白圈'}")
+                    _mlast = content[max(0, (last_of_micro.get(midx) or 1) - 1)]
+                    _mlast_tab = (_mlast.get("tab_type")
+                                  or _mlast.get("base") or "").strip().lower()
+                    if _mlast_tab in ("discussion", "check"):
+                        # 节末就是「讨论页」/「自评表」：这两类平台不把
+                        # 「标记已看」算进节完成度，真播多少遍都不会蓝。
+                        log.info(f"  → 整节「{lf.get('micro')}」仍是白圈，"
+                                 f"但节末是 {_mlast_tab} 页（只能标记已看），"
+                                 "平台不计入完成度，跳过真播重做（省时长）")
+                        unsupported_micros.add(midx)
+                        white_blocked.add(midx)
+                    elif state.retry_burned(_mkey):
+                        log.info(f"  → 整节「{lf.get('micro')}」仍是白圈，"
+                                 "但本地记录显示真播重做也点不亮，跳过重做"
+                                 "（省 1.5~16 分钟）")
+                        unsupported_micros.add(midx)
+                        white_blocked.add(midx)
+                    else:
+                        log.info(f"  → 整节「{lf.get('micro')}」仍是白圈，"
+                                 "回退真实播放重做本节")
+                        # 把本节所有叶子按真实播放再走一遍
+                        for lf2 in content:
+                            if lf2.get("micro_idx") != midx:
+                                continue
+                            u2 = COURSEWARE.format(cid=cid, inst=inst,
+                                                   path=lf2["path"])
+                            try:
+                                page.goto("about:blank", timeout=15000)
+                                page.goto(u2, wait_until="domcontentloaded",
+                                          timeout=50000)
+                                page.wait_for_timeout(5000)
+                                popup.sweep(page, rounds=1)
+                                _play_media(session, cfg, log, page, popup,
+                                            humanizer, V, args.video_max_min,
+                                            rate=1.0, seek=False)
+                                _dwell(session, cfg, log, page, args.real_dwell,
+                                       popup, humanizer)
+                            except Exception as exc:  # noqa: BLE001
+                                log.warning(f"    回退中某项失败: {str(exc)[:70]}")
+                        retried = True
+                        micro_now = PG.micro_done(page, midx)
+                        blue_delta, blue_total = PG.verify(page, before_blue,
+                                                           wait_s=3.0)
+                        micro_turned = bool(micro_now) and before_micro is False
+                        log.info(f"    回退后本节: "
+                                 f"{'蓝圈 ✓' if micro_now else '仍白圈'}")
+                        if not micro_now:
+                            state.burn_retry(_mkey, lf.get("micro"))
+                            white_blocked.add(midx)
+                            log.info("    已记账：这一节以后不再回退真播重做"
+                                     "（想重试用 --retry-burn-reset）")
 
                 done += 1
                 rec = {**lf, "status": "done", "played": played,
@@ -751,10 +799,15 @@ def main():
                 if micro_turned:
                     mark = f"● 本节「{lf.get('micro')}」蓝圈点亮"
                 elif is_last and micro_now is False:
-                    mark = (f"○ 本节「{lf.get('micro')}」含做不完的项"
-                            f"（PC 端不支持 / 需上传 / 三振出局），需手动收尾"
-                            if midx in unsupported_micros
-                            else f"○ 本节「{lf.get('micro')}」仍白圈")
+                    if midx in white_blocked:
+                        mark = (f"○ 本节「{lf.get('micro')}」仍白圈——"
+                                "节末是讨论页/自评表，平台不计入节完成度，"
+                                "只能手动去讨论区发一帖才可能点亮")
+                    elif midx in unsupported_micros:
+                        mark = (f"○ 本节「{lf.get('micro')}」含做不完的项"
+                                f"（PC 端不支持 / 需上传 / 三振出局），需手动收尾")
+                    else:
+                        mark = f"○ 本节「{lf.get('micro')}」仍白圈"
                 elif blue_delta > 0:
                     mark = "● 蓝圈+1"
                 _verb = "未完成" if rec["status"] == "incomplete" else "完成"

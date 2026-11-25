@@ -79,6 +79,53 @@ class RunState:
         """这个叶子是否在有效期内被判定过「本地做不完」（跳过类）。"""
         return bool(self.cached_status(leaf_id))
 
+    # ---------------- 节级「真播重做无效」记忆 ----------------
+    # 背景：某节所有叶子都做完了、目录里那个圈仍是白的，主流程会「回退真实
+    # 播放把整节重做一遍」（rate=1.0 / 不拖动进度条），一节要白耗 1.5~16 分钟。
+    # 实测 2026-11-23 ~ 11-25 共 34 次回退，点亮 0 次——圈白跟播放方式无关
+    # （该节末尾是「讨论页只能标记已看」/「自评表 Review & check」这类项，
+    #  平台不把它算进节完成度）。所以在本地记一笔，有效期内不再对该节重做。
+    def retry_burned(self, micro_key) -> bool:
+        """该节是否已经试过「真播重做」且圈仍不蓝（有效期内）。"""
+        if not self.enabled or self.ttl <= 0:
+            return False
+        rec = (self.data.get("micros") or {}).get(str(micro_key))
+        if not isinstance(rec, dict):
+            return False
+        try:
+            ts = float(rec.get("ts") or 0)
+        except (TypeError, ValueError):
+            return False
+        return ts > 0 and (time.time() - ts) < self.ttl
+
+    def burn_retry(self, micro_key, name: str = ""):
+        """记下「这一节真播重做也没点亮」，后续轮次不再浪费时长。"""
+        if not self.enabled:
+            return
+        micros = self.data.get("micros")
+        if not isinstance(micros, dict):
+            micros = {}
+            self.data["micros"] = micros
+        micros[str(micro_key)] = {
+            "ts": time.time(),
+            "name": str(name or "")[:60],
+        }
+        self.data["updated_at"] = time.time()
+        self._save()
+
+    def reset_retry_burns(self) -> int:
+        """清空「真播重做无效」记忆（平台改版后想再试一次时用）。"""
+        n = len(self.data.get("micros") or {})
+        if n:
+            self.data["micros"] = {}
+            self.data["updated_at"] = time.time()
+            self._save()
+        return n
+
+    @property
+    def burned_count(self) -> int:
+        return len(self.data.get("micros") or {})
+
     def mark(self, leaf_id, status: str, name: str = ""):
         """每处理完一个叶子就增量落盘，崩溃也能从本地状态续跑。"""
         if not self.enabled:
