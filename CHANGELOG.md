@@ -1,5 +1,42 @@
 # 更新日志
 
+## v1.1.6 — 2026-11-25
+
+修掉两个"被判做不了"的题型：Review & check 自评表、Collocation 下拉选词。
+
+### 修复 1：下拉选词 0/6 全失败（真 bug）
+
+`upc/scoop.py` 的 `JS_PICK_SCOOP` 写成 `(idx, answer) =>`，
+而 `page.evaluate()` **只接受一个参数**，于是每个空都抛
+`Page.evaluate() takes from 2 to 3 positional arguments but 4`，
+被 `except` 吞成 debug 日志 → 整题判"未识别题型"→ 三振出局。
+
+- 改成解构单参数 `([idx, answer]) =>`，调用处传 `[idx, ans]`；
+- 补上 antd Dropdown 的 **hover 触发**（原来只 click，弹不出来）；
+- 候选池选择器补 `.scoop-select-wrapper p / i`（隐藏池要跳过
+  `visibility:hidden`）。
+
+实测：同一页从 **0/6 → 5/6** 个空选上，仍差 1 个空（该空平台侧另有校验），
+已单独标 needs_manual，不再每轮白跑。
+
+### 修复 2：自评表 7 行一行都没点（真 bug）
+
+Review & check 是 ant-table：表头 Got it / Review，每行两个圆圈。
+**未选中的图标 class 也是蓝色的 `anticon-border primary-color`**，
+原判定用 `/primary-color/` 当"已选"，于是 7 行全被跳过、直接标记已看。
+
+- 已选判定改为 `anticon-check && !anticon-border`；
+- 逐行点第 2 列（Got it），点完复查选中数。
+
+实测：`自评表：7 行 / 本次点 7 个 / 已选 7 个` → 该叶子 pass
+（读写教程已完成 162 → 164）。
+
+### 测试
+
+- 新增 `tests/test_selfcheck_scoop.py`（6 项：单参数解构、调用打包、
+  hover 触发、候选池覆盖、primary-color 陷阱、接入顺序）；
+  全量 71 项离线测试全绿。
+
 ## v1.1.5 — 2026-11-25
 
 讨论区「真发帖」尝试 + 修掉"日志停住不动"的隐性卡死。

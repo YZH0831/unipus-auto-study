@@ -1448,6 +1448,58 @@ JS_FIND_SUBMIT = r"""
 }
 """
 
+JS_SELFCHECK_FILL = r"""
+() => {
+  // Review & check 自评表：ant-table，表头 Got it / Review，
+  // 每行一个能力描述 + 两列圆圈（未选是 .anticon-border）。
+  // 平台要求逐行点一个，只点第 2 列（Got it）。
+  const tables = [...document.querySelectorAll('table')].filter(
+    t => /Got it/i.test(((t.querySelector('thead') || {}).innerText) || ''));
+  let rows = 0, clicked = 0, done = 0;
+  for (const t of tables) {
+    for (const tr of t.querySelectorAll('tbody tr.ant-table-row')) {
+      const tds = tr.querySelectorAll('td');
+      if (tds.length < 3) continue;          // 分类标题行（colspan=3）
+      rows++;
+      const cell = tds[1];                   // 第 2 列 = Got it
+      const ic = cell.querySelector('.anticon-border')
+              || cell.querySelector('span[role="img"]');
+      if (!ic) continue;
+      // ★ 注意：未选中的图标也是 blue 的 primary-color（实测
+      //   <span class="anticon anticon-border primary-color">），
+      //   只能靠 border/check 区分，别拿 primary-color 当"已选"。
+      const cls = String(ic.className || '');
+      if (/anticon-check/.test(cls) && !/anticon-border/.test(cls)) {
+        done++;                              // 已经选过
+        continue;
+      }
+      ic.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+      clicked++;
+    }
+  }
+  return {tables: tables.length, rows, clicked, done};
+}
+"""
+
+JS_SELFCHECK_DONE = r"""
+() => {
+  const tables = [...document.querySelectorAll('table')].filter(
+    t => /Got it/i.test(((t.querySelector('thead') || {}).innerText) || ''));
+  let rows = 0, picked = 0;
+  for (const t of tables) {
+    for (const tr of t.querySelectorAll('tbody tr.ant-table-row')) {
+      const tds = tr.querySelectorAll('td');
+      if (tds.length < 3) continue;
+      rows++;
+      const ic = tds[1].querySelector('span[role="img"]');
+      const c2 = ic ? String(ic.className) : '';
+      if (ic && /anticon-check/.test(c2) && !/anticon-border/.test(c2)) picked++;
+    }
+  }
+  return {rows, picked};
+}
+"""
+
 JS_FIND_PUBLISH = r"""
 () => {
   for (const el of document.querySelectorAll('a,button,div,span')) {
@@ -1536,6 +1588,35 @@ def _page_alive(page, timeout_ms=5000):
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def _fill_selfcheck(page, log):
+    """Review & check 自评表（Got it / Review）：逐行点第 2 列。
+
+    实测结构：ant-table，thead 是 Got it / Review，每行一个能力描述 +
+    两个 `.anticon-border` 圆圈（未选）。平台只要每行选一个就算完成，
+    取「Got it」（第 2 列）最省事——选 Review 会给自己标"待复习"。
+    返回已选中的行数。
+    """
+    try:
+        r = page.evaluate(JS_SELFCHECK_FILL) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"    自评表处理异常: {type(exc).__name__}: {str(exc)[:60]}")
+        return 0
+    if not r.get("rows"):
+        return 0
+    page.wait_for_timeout(1200)
+    try:
+        d = page.evaluate(JS_SELFCHECK_DONE) or {}
+    except Exception:  # noqa: BLE001
+        d = {}
+    rows = int(r.get("rows") or 0)
+    picked = int(d.get("picked") or 0)
+    log.info(f"    自评表：{rows} 行 / 本次点 {r.get('clicked', 0)} 个 / "
+             f"已选 {picked} 个")
+    if picked < rows:
+        log.warning(f"    自评表还有 {rows - picked} 行没选上")
+    return picked
 
 
 def _post_discussion(page, log, popup, lf):
@@ -2483,13 +2564,38 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                     if not _ans:
                         continue
                     try:
+                        # ① 真实鼠标 hover（antd Dropdown 主要吃 mouseenter）
+                        try:
+                            _trig = page.query_selector(
+                                f'span.fe-scoop[data-scoop-index="{_s["index"]}"] '
+                                ".ant-dropdown-trigger.user-answer")
+                            if _trig is not None:
+                                _trig.scroll_into_view_if_needed(timeout=2000)
+                                _trig.hover(timeout=3000)
+                                page.wait_for_timeout(500)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        # ② 兜底：JS 派发全套鼠标事件 + click
                         page.evaluate(_scoop.JS_OPEN_SCOOP, str(_s["index"]))
                         page.wait_for_timeout(350)
+                        # evaluate 只能传一个 arg：打包成 [idx, answer]
                         _r2 = page.evaluate(_scoop.JS_PICK_SCOOP,
-                                            str(_s["index"]), _ans)
+                                            [str(_s["index"]), _ans])
                         if _r2 and _r2.get("ok"):
                             _picked += 1
                             page.wait_for_timeout(200)
+                        else:
+                            # 没选上 → 把这个空的候选词和当前可见菜单打出来校准
+                            try:
+                                _menu = page.evaluate(
+                                    _scoop.JS_DUMP_SCOOP_MENU) or []
+                                log.info(f"    空{_s['index']} 选不上"
+                                         f"（想选 {_ans!r}，候选 "
+                                         f"{_s.get('options')}）"
+                                         f"可见菜单: "
+                                         f"{json.dumps(_menu, ensure_ascii=False)[:300]}")
+                            except Exception:  # noqa: BLE001
+                                pass
                     except Exception as exc:  # noqa: BLE001
                         log.debug(f"    下拉空{_s['index']} 选择失败: {str(exc)[:60]}")
                 info["scoop"] = _picked
@@ -2500,6 +2606,18 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                     log.warning(f"    下拉填空还有 {len(_scoops) - _picked} 个空没选上")
         except Exception as exc:  # noqa: BLE001
             log.debug(f"    下拉选词填空处理异常: {str(exc)[:80]}")
+
+        # ①d Review & check 自评表（Got it / Review）
+        #     以前这种 ant-table 自评页整页判"未识别题型"，三振出局不再做。
+        #     实际只要每行点一个圈就算完成，点「Got it」即可。
+        try:
+            _sc = _fill_selfcheck(page, log)
+            if _sc:
+                info["selfcheck"] = _sc
+                info["answered"] = info.get("answered", 0) + _sc
+                info["total"] = max(info.get("total", 0), _sc)
+        except Exception as _sce:  # noqa: BLE001
+            log.debug(f"    自评表异常: {type(_sce).__name__}: {str(_sce)[:70]}")
 
         # ② 客观选择题：按题块 + 听力转录判断答案（不再全选）
         from upc.hearing import decide as _decide
@@ -2791,6 +2909,8 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
         if _has_blocks and not (locals().get("groups") or []) \
                 and not (locals().get("blanks") or []) \
                 and not info.get("openq") \
+                and not info.get("selfcheck") \
+                and not info.get("scoop") \
                 and not info.get("sequence") and not info.get("voice"):
             # 留存现场，便于事后补上这种新题型
             _d = {}

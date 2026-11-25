@@ -71,6 +71,8 @@ JS_SCAN_SCOOPS = r"""
 """
 
 # 点开某个空的下拉，读出真正弹出的候选项（ant-design 下拉菜单）。
+# ★ 2026-11-25：antd Dropdown 默认是 **hover 触发**，只调 trig.click()
+#   弹不出来（实测 6 个空一个都没选上）。这里把鼠标事件全套派发一遍。
 JS_OPEN_SCOOP = r"""
 (idx) => {
   const n = document.querySelector('span.fe-scoop[data-scoop-index="' + idx + '"]');
@@ -78,22 +80,58 @@ JS_OPEN_SCOOP = r"""
   const trig = n.querySelector('.ant-dropdown-trigger.user-answer');
   if (!trig) return {ok:false, why:'no trigger'};
   trig.scrollIntoView({block:'center'});
-  trig.click();
-  return {ok:true};
+  const r = trig.getBoundingClientRect();
+  const opt = {bubbles: true, cancelable: true, view: window,
+               clientX: Math.round(r.left + r.width / 2),
+               clientY: Math.round(r.top + r.height / 2)};
+  for (const ev of ['pointerover', 'mouseenter', 'mouseover', 'mousemove']) {
+    try { trig.dispatchEvent(new MouseEvent(ev, opt)); } catch (e) {}
+  }
+  try { trig.click(); } catch (e) {}
+  return {ok: true};
+}
+"""
+
+# 诊断：把当前页面上"看起来像下拉菜单"的可见容器列出来，用于校准选择器。
+JS_DUMP_SCOOP_MENU = r"""
+() => {
+  const out = [];
+  for (const el of document.querySelectorAll(
+      '[class*="dropdown"], [class*="select"], [class*="option"], [role="listbox"], ul')) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 20 || r.height < 10) continue;
+    const st = getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') continue;
+    const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+    if (!t) continue;
+    out.push({cls: String(el.className).slice(0, 80),
+              t: t.slice(0, 90), wh: Math.round(r.width) + 'x' + Math.round(r.height)});
+  }
+  return out.slice(0, 12);
 }
 """
 
 # 在已弹出的菜单里，按文本精确点击目标选项。
+# ★ 2026-11-25 修：Playwright 的 evaluate 只能传 **一个** arg，
+#   原来的 (idx, answer) => 两参数写法会抛
+#   "Page.evaluate() takes from 2 to 3 positional arguments but 4"，
+#   于是每个空都静默失败、整题被判"未识别"三振出局。改成解构单参数。
 JS_PICK_SCOOP = r"""
-(idx, answer) => {
+([idx, answer]) => {
   const wanted = String(answer || '').trim();
   let picked = false;
   const sel = '.ant-dropdown-menu-item, .ant-select-item-option, '
-            + '[class*="dropdown"] li, [class*="option-item"]';
+            + '[class*="dropdown"] li, [class*="option-item"], '
+            + '.scoop-select-wrapper p, .scoop-select-wrapper i, '
+            + '[class*="dropdown"] [class*="item"]';
   for (const el of document.querySelectorAll(sel)) {
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
-    const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+    // 隐藏的选项池（visibility:hidden / display:none）不能点
+    const st = getComputedStyle(el);
+    if (st.visibility === 'hidden' || st.display === 'none') continue;
+    const t = (el.innerText || el.textContent || '')
+                .replace(/\s+/g, ' ').trim();
     if (t === wanted) { el.click(); picked = true; break; }
   }
   if (picked) {
