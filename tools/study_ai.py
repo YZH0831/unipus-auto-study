@@ -163,6 +163,9 @@ def main():
                     help="只做 micro 索引 <= N 的节（含）")
     ap.add_argument("--plan", action="store_true",
                     help="只列本次将处理/跳过的叶子清单，不实际刷课")
+    ap.add_argument("--leftover", action="store_true",
+                    help="只读：列出所有未完成叶子并按「能做/只能App/需上传/"
+                         "题型不支持」分类，落盘 output/leftover.md（不刷课）")
     ap.add_argument("--list-micro", action="store_true",
                     help="列出所有 micro 节及其蓝圈状态")
     ap.add_argument("--quiz-discussion", action="store_true",
@@ -453,6 +456,86 @@ def main():
                              if v.get("blocks") or v.get("letters")}
         except Exception:  # noqa: BLE001
             pass
+
+        # ---------- 未完成清单（固定流程入口） ----------
+        # 只读不改：拉一次平台 pass + 本地缓存，把 281 个叶子分成
+        #   done / todo（程序能做）/ app（只能 App 端）/ upload（需上传作品）
+        #   / manual（反复失败，题型还不支持）
+        # 并落盘 output/leftover.md，照着它收尾就行。
+        if args.leftover:
+            _rows = []
+            for _i, _lf in enumerate(content, 1):
+                _id = str(_lf.get("id"))
+                _passed = _id in (passed_ids or set()) and _id not in low_ids
+                _st = state.cached_status(_id)
+                if _passed:
+                    _cat = "done"
+                elif _st == "unsupported_pc":
+                    _cat = "app"
+                elif _st == "needs_upload":
+                    _cat = "upload"
+                elif _st == "needs_manual":
+                    _cat = "manual"
+                else:
+                    _cat = "todo"
+                _rows.append((_i, _lf, _cat))
+
+            _cnt = {}
+            for _r in _rows:
+                _cnt[_r[2]] = _cnt.get(_r[2], 0) + 1
+            _label = {"done": "已完成", "todo": "待做（程序能做）",
+                      "app": "只能 App 端", "upload": "需上传作品",
+                      "manual": "题型不支持（需手动）"}
+            log.info("=" * 62)
+            log.info(f"未完成清单：共 {len(_rows)} 个叶子")
+            for _k in ("done", "todo", "app", "upload", "manual"):
+                if _cnt.get(_k):
+                    log.info(f"  {_label[_k]:<18} {_cnt[_k]:>3} 个")
+            log.info("=" * 62)
+
+            _groups = {}
+            for _i, _lf, _cat in _rows:
+                if _cat == "done":
+                    continue
+                _groups.setdefault((_lf.get("micro_idx"), _lf.get("micro"),
+                                    _lf.get("unit"), _cat), []).append((_i, _lf))
+
+            md = [f"# 未完成清单（共 {len(_rows)} 个叶子）", "",
+                  "| 分类 | 数量 |", "|---|---|"]
+            for _k in ("done", "todo", "app", "upload", "manual"):
+                if _cnt.get(_k):
+                    md.append(f"| {_label[_k]} | {_cnt[_k]} |")
+            md.append("")
+            for _key in sorted(_groups, key=lambda x: (x[3] != "todo",
+                                                       x[0] or 0)):
+                _mi, _mn, _un, _cat = _key
+                md.append(f"## [{_label[_cat]}] m{_mi} {_un} / {_mn}")
+                for _i, _lf in _groups[_key]:
+                    _tab = _lf.get("tab_type") or _lf.get("base") or ""
+                    md.append(f"- `[{_i}]` {_lf.get('name')} ({_tab})")
+                md.append("")
+
+            _todo_micros = sorted({k[0] for k in _groups if k[3] == "todo"})
+            if _todo_micros:
+                md.append("## 建议命令")
+                md.append("```")
+                md.append("# 只补「程序能做」的节（按 micro 区间）")
+                md.append(f"python tools/study_ai.py --book rw "
+                          f"--micro-from {_todo_micros[0]} "
+                          f"--micro-to {_todo_micros[-1]}")
+                md.append("```")
+                log.info("待做节号：" + ", ".join(f"m{m}" for m in _todo_micros))
+                log.info("建议：python tools/study_ai.py --book rw "
+                         f"--micro-from {_todo_micros[0]} "
+                         f"--micro-to {_todo_micros[-1]}")
+            _out_md = Path(cfg.output_dir) / "leftover.md"
+            try:
+                _out_md.parent.mkdir(parents=True, exist_ok=True)
+                _out_md.write_text("\n".join(md), encoding="utf-8")
+                log.info(f"清单已写入 {_out_md}")
+            except Exception as _oe:  # noqa: BLE001
+                log.warning(f"清单写入失败: {type(_oe).__name__}")
+            return 0
 
         if args.plan:
             _uni = [x for x in content
@@ -2500,6 +2583,28 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                         f" / 空 {info.get('unfinished_blanks', 0)}），本次暂不提交")
             info["submitted"] = ""
             return info
+
+        # ②b 上传作品题（Unit project / 作品提交页）
+        #     平台只看「有没有作品文件」，不传文件点提交只会弹
+        #     「还有1道题没有作答」——以前就卡在这里被判 needs_upload。
+        #     现在：没有作品 → 大模型写一篇 → 打成 PDF → 塞进隐藏 file 控件。
+        try:
+            from upc import upload as _UP
+            _stem_up = ((scan.get("stem") or "") + "\n"
+                        + (locals().get("_openq_page_text") or ""))
+            _up = _UP.fill_work_upload(page, log, lf, _stem_up,
+                                       cli=_get_llm(cfg, log),
+                                       out_dir=ROOT / "output")
+            if _up is True:
+                info["uploaded"] = True
+                log.info("    上传题：作品已就位，继续走提交")
+            elif _up is False:
+                info["needs_upload"] = True
+                info["submitted"] = ""
+                log.warning("    上传题：作品没传上去，本次先不提交")
+                return info
+        except Exception as _ue:  # noqa: BLE001
+            log.debug(f"    上传题处理异常: {type(_ue).__name__}: {str(_ue)[:80]}")
 
         # ③ 提交 + 判分闭环
         from upc.decrypt import (parse_answers, first_answer_list,

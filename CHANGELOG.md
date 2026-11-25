@@ -1,5 +1,33 @@
 # 更新日志
 
+## v1.1.4 — 2026-11-25
+
+未完成清单 `--leftover` + 上传作品题（Unit project）全自动。
+
+### 新增
+
+- `tools/study_ai.py --leftover`：只读扫一遍，把 281 个叶子分成
+  **已完成 / 待做（程序能做）/ 只能 App / 需上传作品 / 题型不支持**，
+  落盘 `output/leftover.md` 并给出建议命令。收尾时照着单子跑就行。
+- `upc/upload.py` + `upc/pdfgen.py`：Unit project 这类「拖文件才算作答」
+  的页面现在能全自动——大模型按题干写一篇英文作品 → 零依赖打成 PDF
+  → `set_input_files` 塞进隐藏 `input[type=file]` → 轮询等列表项 → 再提交。
+  `pdfgen` 是手写的 Helvetica/A4 单字体 PDF 生成器，**不新增任何依赖**。
+
+### 修复
+
+- 「需上传作品」以前被判死后永久跳过（`needs_upload` 在 7 天 TTL 内连页面
+  都不打开），其实平台只校验有没有文件，程序完全能代劳。
+- 实测 Unit 1 Unit project：作品 1382 字符 → PDF → 2s 传完 → 点提交
+  → 平台回「成功」→ 该叶子 pass（本轮 162→163）。
+
+### 测试
+
+- 新增 `tests/test_upload_flow.py`（9 项：PDF 骨架/分页/转义、detect 三态、
+  投递成功、已有作品不重复投递、非上传题返回 None、接入点在提交之前）；
+  既有 `test_offline` 29/29、`test_selfheal_fix` 10/10、
+  `test_voice_score_report` 6/6、`test_retry_burn` 5/5 通过。
+
 ## v1.1.3 — 2026-11-25
 
 不再对「真播重做也点不亮」的节白耗时长（`tools/study_ai.py`、`upc/runstate.py`）。
