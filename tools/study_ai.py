@@ -776,6 +776,17 @@ def main():
             upload_skips = sum(1 for r in report
                                if r.get("status") in
                                ("needs_upload", "skipped_needs_upload"))
+            # ★ 口语题成绩汇总：口语分来自 SOE 评测（info["voice"]=True），
+            #   和客观题的题库标准答案分开统计，跑完一轮能一眼看清口语真实分数。
+            voice_scores = []
+            for r in report:
+                q = r.get("quiz") or {}
+                if q.get("voice") and isinstance(q.get("score"), (int, float)):
+                    voice_scores.append({
+                        "name": r.get("name"),
+                        "unit": r.get("unit"),
+                        "score": round(float(q["score"]) * 100, 1),
+                    })
             out.write_text(json.dumps({"elapsed_min": round((time.time() - started) / 60, 1),
                                        "done": done, "blue_gained": gained,
                                        "micros_turned": turned,
@@ -785,6 +796,7 @@ def main():
                                        "cached_skips": cached_skips,
                                        "manual_skips": manual_skips,
                                        "upload_skips": upload_skips,
+                                       "voice_scores": voice_scores,
                                        "tasks": report},
                                       ensure_ascii=False, indent=2), encoding="utf-8")
             log.info("=" * 62)
@@ -801,6 +813,11 @@ def main():
                 log.info(f"三振出局（反复失败、需手动完成）：本轮出局 "
                          f"{len(manual_out_list)} 项 / 缓存跳过 {manual_skips} 项"
                          "（后续不再重做；--retry-manual 可重试）")
+            if voice_scores:
+                _vs = "、".join(f"{v['name'][:14]}={v['score']:.0f}分"
+                               for v in voice_scores[:12])
+                _avg = sum(v["score"] for v in voice_scores) / len(voice_scores)
+                log.info(f"口语题 SOE 评分：{len(voice_scores)} 题 / 平均 {_avg:.0f} 分 → {_vs}")
             if cached_skips:
                 log.info(f"断点续跑缓存直接跳过：{cached_skips} 项（连页面都没打开）")
             log.info(f"报告：{out}")
@@ -2549,8 +2566,16 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
             score = ((data.get("record_grade") or {}).get("scorePct"))
             std_letters = first_answer_list(parse_answers(_analysis, _daykey))
             std_blocks = parse_answer_blocks(_analysis, _daykey)
-            log.info(f"    判分：scorePct={score} 标准答案={std_letters} "
-                     f"分组={len(std_blocks)} 组")
+            # ★ 口语题分数单独标注：口语分来自 SOE 语音评测，和客观题的
+            #   「首遍试探分 / 题库标准答案」不是一回事。以前混在同一行
+            #   「判分 scorePct=...」里，容易把口语 0.85 误当成选择题未满分。
+            if info.get("voice"):
+                _pct = f"{score * 100:.0f}" if isinstance(score, (int, float)) else "?"
+                log.info(f"    ★ 口语题评分：{_pct} 分"
+                         f"（SOE 语音评测，含准确度/流利度/完整度）")
+            else:
+                log.info(f"    判分：scorePct={score} 标准答案={std_letters} "
+                         f"分组={len(std_blocks)} 组")
 
         # 提交后页面进入 review 模式、控件锁定，无法当场改答案；
         # 选择题重进后连 .option 都不渲染。统一交给第二遍（--passes）

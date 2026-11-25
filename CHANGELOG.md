@@ -1,5 +1,24 @@
 # 更新日志
 
+## v1.1.2 — 2026-11-25
+
+让口语题的 SOE 语音评测分数在日志与报告中清晰可见（`tools/study_ai.py`）。
+
+### 改进
+
+- 口语题提交拿到分后，用专门文案打印「★ 口语题评分：NN 分（SOE 语音评测）」，
+  不再和客观题的「判分 scorePct=... 标准答案=[...]」混在一行——后者是题库试探分，
+  两者含义不同，混排容易被误读成口语题没满分。
+- `study_ai_report.json` 新增 `voice_scores` 数组（题名 / 单元 / 百分制分数），
+  运行结束日志同步输出「口语题 SOE 评分：N 题 / 平均 XX 分」及各题分数。
+- 说明：分数本来就来自提交接口的 `record_grade.scorePct` 并已写进 `info["score"]`，
+  只是此前日志未区分来源；本次不改评分逻辑，只提升可见性。
+
+### 测试
+
+- 新增 `tests/test_voice_score_report.py`（6 项：日志分流 + 报告提取行为模拟）；
+  `test_offline.py` 29/29、`test_selfheal_fix.py` 10/10 通过；`py_compile` OK。
+
 ## v1.1.1 — 2026-11-25
 
 减少运行中「本可自愈却停下来叫人」的环节（`tools/study_ai.py`）。
