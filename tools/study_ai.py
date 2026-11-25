@@ -315,16 +315,25 @@ def main():
         struct_raw = _fetch_struct()
 
         # 结构为空十有八九是登录态过期（接口直接 404）。
-        # 这里自动重新登录一次再重试，避免用户看到"黑框一闪就没了"。
+        # ★ 自愈：最多重试 2 轮「强制重登 → 重新取结构」，不必叫用户手动敲命令。
+        #   以前只重登 1 次就报「请手动执行 api_run.py」，属于本可自动完成的假人工。
         if not (struct_raw or {}).get("course"):
-            log.warning("课程结构为空（通常是登录态过期），自动重新登录…")
-            if _relogin_and_reinject(session, cfg, log):
-                struct_raw = _fetch_struct()
+            for _heal_i in range(1, 3):
+                log.warning(f"课程结构为空（通常是登录态过期），自动重登自愈 "
+                            f"{_heal_i}/2…")
+                if _relogin_and_reinject(session, cfg, log):
+                    struct_raw = _fetch_struct()
+                if (struct_raw or {}).get("course"):
+                    log.info(f"  自愈成功（第 {_heal_i} 次重登后结构恢复）")
+                    break
+                page.wait_for_timeout(1500)
 
         course_str = (struct_raw or {}).get("course")
         if not course_str:
             log.error(f"课程结构为空: {str(struct_raw)[:200]}")
-            log.error("自动重登也没拿到结构，请手动执行：")
+            log.error("自动重登自愈 2 次仍拿不到结构——多半是账号被顶号 / "
+                      "平台临时故障，稍后再试通常自己就好；"
+                      "确需强制重登才手动执行：")
             log.error("  python tools/api_run.py --session-only --no-cache")
             return 1
         struct = json.loads(course_str) if isinstance(course_str, str) else course_str
@@ -472,6 +481,9 @@ def main():
             return 0
 
         aborted = False
+        # 自愈额度：连续打不开叶片时先尝试自动重登，而不是立刻叫人。
+        # 每遍最多自愈 2 次，避免登录态彻底失效时空转。
+        heal_budget = {"left": 2}
         for _pass in range(max(1, args.passes)):
             if aborted:
                 log.info("上一遍因连续打开失败中止，不再跑后续遍")
@@ -539,18 +551,39 @@ def main():
                     consecutive_failures += 1
                     limit = nav["max_consecutive_failures"]
                     if limit and consecutive_failures >= limit:
+                        # ★ 自愈优先：连续打不开十有八九是登录态过期。
+                        #   先自动重登 + 重新注入 cookie，再来一次；真救不回来才叫人。
+                        #   这样正常情况下用户完全不用看到「请手动执行 api_run.py」。
+                        healed = False
+                        if heal_budget["left"] > 0:
+                            heal_budget["left"] -= 1
+                            log.warning(f"连续 {consecutive_failures} 个叶子打不开，"
+                                        "先尝试自动重登刷新会话（自愈），不急着叫人…")
+                            try:
+                                if _relogin_and_reinject(session, cfg, log):
+                                    # 取一次课程结构，确认新会话真的可用（非空即活）
+                                    struct_raw = _fetch_struct()
+                                    if (struct_raw or {}).get("course"):
+                                        consecutive_failures = 0
+                                        healed = True
+                                        log.info("  自愈成功：会话已刷新、结构可读，"
+                                                 "继续本轮")
+                            except Exception as _he:  # noqa: BLE001
+                                log.warning(f"  自愈尝试失败: "
+                                            f"{type(_he).__name__}: {str(_he)[:90]}")
+                        if healed:
+                            continue
+                        # 自愈额度用完 / 自愈失败 → 才叫人（确定性的活脚本干，
+                        # 判断不了的异常交给 WorkBuddy）。
                         log.error("=" * 62)
                         log.error(f"连续 {consecutive_failures} 个叶子打不开，"
-                                  "判定登录态失效 / 白屏空转，提前结束本轮")
-                        log.error("建议重新运行 tools/api_run.py 刷新会话，"
-                                  "或检查网络后再跑；避免空转满设定时长")
+                                  "自动重登也没救回来，提前结束本轮")
                         log.error("=" * 62)
-                        # 异常才叫人（借鉴 agent-skill 的监督者-Runner 分工）：
-                        # 确定性的活脚本干，判断不了的异常交给 WorkBuddy。
                         try:
                             from wb_helper import wake
-                            wake("连续打开课件页失败，疑似登录态失效",
-                                 detail=f"连续 {consecutive_failures} 个叶子打不开，已提前结束",
+                            wake("连续打开课件页失败，自动重登自愈也失败",
+                                 detail=f"连续 {consecutive_failures} 个叶子打不开，"
+                                        "已自愈重试仍失败，提前结束",
                                  rc=2)
                         except Exception as _we:  # noqa: BLE001
                             log.debug(f"唤起 WorkBuddy 兜底失败: {type(_we).__name__}")
