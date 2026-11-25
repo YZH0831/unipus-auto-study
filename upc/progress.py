@@ -32,7 +32,18 @@ JS_SCAN = r"""
 
 
 def scan(page):
-    """返回 [{i, name, done, state}]；页面没渲染好时返回 []。"""
+    """返回 [{i, name, done, state}]；页面没渲染好时返回 []。
+
+    ★ 先探活再 evaluate：点过「发表/提交/上传」后页面偶尔会进入 JS 忙状态，
+      此时 page.evaluate 会**永久挂起**（Playwright 的 evaluate 没有超时参数），
+      整条流水线就静默卡死——用户报的"卡住不动"就是它。
+      wait_for_function 有超时，当探针用；探不通就当"判断不出来"返回空。
+    """
+    try:
+        page.wait_for_function(
+            "() => document.readyState !== 'loading'", timeout=4000)
+    except Exception:  # noqa: BLE001
+        return []
     try:
         return page.evaluate(JS_SCAN) or []
     except Exception:  # noqa: BLE001

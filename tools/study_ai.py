@@ -28,6 +28,7 @@
 """
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -169,7 +170,8 @@ def main():
     ap.add_argument("--list-micro", action="store_true",
                     help="列出所有 micro 节及其蓝圈状态")
     ap.add_argument("--quiz-discussion", action="store_true",
-                    help="连 discussion 讨论页也填（会发表内容，默认不启用）")
+                    help="讨论页「真发帖」：把模型写好的内容点「发表」发出去"
+                         "（公开发言；默认关闭=只标记已看）")
     ap.add_argument("--choice-mode", default="all", choices=["all", "half", "first"],
                     help="客观题选项点几个：all=全选(默认) half=前半 first=只第一个")
     ap.add_argument("--list", action="store_true", help="只列任务清单")
@@ -713,10 +715,12 @@ def main():
                 # discussion 是公开发言，默认跳过，除非显式 --quiz-discussion。
                 quiz_info = None
                 if args.quiz == "fill":
-                    # discussion 现在只做「标记已看」（submitType=2），
-                    # 不往讨论区发内容，所以不再需要 --quiz-discussion 开关
+                    # 默认只做「标记已看」（submitType=2）；加 --quiz-discussion
+                    # 才真的去讨论区发一条（公开发言，自己决定）。
                     quiz_info = _handle_quiz(session, cfg, log, page, popup,
-                                             humanizer, lf, args.choice_mode)
+                                             humanizer, lf, args.choice_mode,
+                                             post_discussion=bool(
+                                                 args.quiz_discussion))
                 pc_skip = bool(quiz_info and quiz_info.get("unsupported_pc"))
                 up_skip = bool(quiz_info and quiz_info.get("needs_upload"))
                 # ★ 三振出局：同一叶子反复失败说明题型程序做不了
@@ -1501,6 +1505,247 @@ def _fill_discussion(page, log):
         return 0
 
 
+JS_DISC_TEXT_LEN = r"""
+() => {
+  // 讨论输入框里现有内容的长度（用来判断"填好了没"和"发出去没"）
+  let best = 0;
+  for (const el of document.querySelectorAll(
+      'textarea,[contenteditable="true"]')) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 20) continue;
+    const v = el.tagName === 'TEXTAREA' ? el.value : (el.innerText || '');
+    const n = (v || '').replace(/\s+/g, ' ').trim().length;
+    if (n > best) best = n;
+  }
+  return best;
+}
+"""
+
+
+def _page_alive(page, timeout_ms=5000):
+    """探活：页面的 JS 线程还转不转。
+
+    2026-11-25 排查发现：点过某些按钮后页面会进入"JS 忙/被模态卡住"状态，
+    此时 page.evaluate 会**永久挂起**（Playwright 的 evaluate 没有超时），
+    表现就是"日志停住、进程不死也不动"，一等好几分钟。
+    wait_for_function 有超时，可以当探针用。
+    """
+    try:
+        page.wait_for_function(
+            "() => document.readyState !== 'loading'", timeout=timeout_ms)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _post_discussion(page, log, popup, lf):
+    """讨论页「真发帖」：把已填内容点「发表」发出去。
+
+    为什么必须真发：实测 Discussion 叶子靠 mark_seen（submitType=2）
+    已经 pass=1，但所属节的白圈永远不蓝——平台只把"真的参与讨论"
+    算进节完成度。这也是「回退真实播放重做」34 次全败的根因。
+
+    返回 (ok, 原因)。
+    """
+    try:
+        n = int(page.evaluate(JS_DISC_TEXT_LEN) or 0)
+    except Exception:  # noqa: BLE001
+        n = 0
+    if n < 20:
+        log.info("    讨论区输入框是空的（没内容可发），跳过发帖")
+        return False, "no-text"
+
+    box = {}
+
+    def _on(r):
+        u = r.url or ""
+        if ("/newExploration/submit" in u or "/discussion" in u
+                or "/discuss" in u or "/comment" in u or "/reply" in u):
+            try:
+                box["j"] = r.json()
+            except Exception:  # noqa: BLE001
+                pass
+
+    page.on("response", _on)
+    # 抓包开关：UPC_PROBE_DISC=1 时把点击「发表」前后所有 xhr/fetch 记下来，
+    # 用来校准发帖接口（第一次接新题型时用，平时不占开销）。
+    probe = None
+    if os.environ.get("UPC_PROBE_DISC"):
+        probe = {"req": [], "resp": []}
+
+        def _on_req(r):
+            try:
+                if r.resource_type in ("xhr", "fetch"):
+                    probe["req"].append({
+                        "m": r.method, "u": r.url,
+                        "d": (r.post_data or "")[:400]})
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _on_resp(r):
+            try:
+                if r.request.resource_type in ("xhr", "fetch"):
+                    probe["resp"].append({"s": r.status, "u": r.url})
+            except Exception:  # noqa: BLE001
+                pass
+
+        page.on("request", _on_req)
+        page.on("response", _on_resp)
+    try:
+        pub = page.evaluate(JS_FIND_PUBLISH) or None
+        if not pub:
+            log.info("    页面上找不到「发表」按钮，跳过发帖")
+            return False, "no-btn"
+        if probe is not None:
+            try:
+                _js = r"""
+                () => {
+                  const hits = [];
+                  for (const el of document.querySelectorAll('a,button,span,div')) {
+                    if (el.children.length) continue;
+                    const t = (el.innerText || '').replace(/\s+/g, '').trim();
+                    if (t !== '发表' && t !== '发表回复') continue;
+                    const r = el.getBoundingClientRect();
+                    hits.push({tag: el.tagName,
+                               cls: String(el.className).slice(0, 50),
+                               t: t, w: Math.round(r.width), h: Math.round(r.height),
+                               dis: el.hasAttribute('disabled')
+                                    || String(el.className).includes('dis-'),
+                               html: el.outerHTML.slice(0, 110)});
+                  }
+                  const tas = [...document.querySelectorAll(
+                      'textarea,[contenteditable="true"]')].map(x => ({
+                        cls: String(x.className).slice(0, 70),
+                        len: ((x.value !== undefined ? x.value : x.innerText) || '')
+                              .trim().length,
+                        ph: x.getAttribute('placeholder') || ''}));
+                  return {hits: hits, tas: tas,
+                          txt: (document.body.innerText || '').slice(0, 200)};
+                }"""
+                log.info("    发帖前 DOM: "
+                         + json.dumps(page.evaluate(_js) or {},
+                                      ensure_ascii=False)[:800])
+            except Exception as _de:  # noqa: BLE001
+                log.debug(f"    DOM 诊断失败: {type(_de).__name__}")
+        el = page.query_selector('[data-upc-publish="1"]')
+        if el is None:
+            return False, "no-el"
+        # ★ 先用键盘把内容真实重打一遍。
+        #   实测：JS setter 塞进 .dis-content 的文本，React 的 class 虽然变了
+        #   （dis-dis-content → dis-content），但点「发表」**0 个网络请求**，
+        #   说明编辑器实例没拿到真正的 onChange。逐字 keyboard.type 才是真输入。
+        try:
+            _txt = page.evaluate(r"""
+            () => {
+              for (const el of document.querySelectorAll(
+                  '.dis-content, textarea, [contenteditable="true"]')) {
+                const r = el.getBoundingClientRect();
+                if (r.width < 40 || r.height < 20) continue;
+                const v = el.value !== undefined ? el.value : el.innerText;
+                if (v && v.trim().length >= 20) return v.trim();
+              }
+              return '';
+            }""") or ""
+            ta = page.query_selector('.dis-content')
+            if ta is not None and _txt:
+                ta.click(timeout=4000)
+                page.wait_for_timeout(300)
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Delete")
+                page.wait_for_timeout(200)
+                page.keyboard.type(_txt, delay=10)
+                page.wait_for_timeout(800)
+                log.info(f"    已用键盘重打内容（{len(_txt)} 字符）")
+        except Exception as _ke:  # noqa: BLE001
+            log.debug(f"    键盘重打失败: {type(_ke).__name__}: {str(_ke)[:60]}")
+        try:
+            el.scroll_into_view_if_needed(timeout=3000)
+        except Exception:  # noqa: BLE001
+            pass
+        # 多路尝试：① JS 直接派发 click（绕过可能盖在上面的编辑器遮罩）
+        #           ② Playwright 真实鼠标点击
+        # 实测 2026-11-25：单独用 ② 时"发表"点了 0 个请求，说明事件被吞了。
+        try:
+            _hit = page.evaluate(r"""
+            () => {
+              const rt = document.querySelector('.reply-title');
+              if (rt) rt.click();
+              const cands = [...document.querySelectorAll('a,button,span')];
+              const a = cands.find(x => (x.innerText || '').replace(/\s+/g, '')
+                                        === '发表');
+              if (a) { a.click(); return String(a.className || 'a'); }
+              return '';
+            }""")
+            log.info(f"    JS 派发点击「发表」→ {_hit!r}")
+            page.wait_for_timeout(2500)
+        except Exception as _ce:  # noqa: BLE001
+            log.debug(f"    JS 点击失败: {type(_ce).__name__}")
+        if not box.get("j"):
+            el.click(timeout=6000)
+            log.info(f"    已点「发表」（{pub.get('tag')}."
+                     f"{str(pub.get('cls'))[:24]}）")
+        page.wait_for_timeout(4500)
+        popup.sweep(page, rounds=1)
+        if probe is not None:
+            try:
+                _js2 = r"""
+                () => {
+                  const tas = [...document.querySelectorAll(
+                      'textarea,[contenteditable="true"]')].map(x => ({
+                        cls: String(x.className).slice(0, 70),
+                        len: ((x.value !== undefined ? x.value : x.innerText) || '')
+                              .trim().length}));
+                  return {tas: tas,
+                          txt: (document.body.innerText || '').slice(0, 300)};
+                }"""
+                log.info("    发帖后 DOM: "
+                         + json.dumps(page.evaluate(_js2) or {},
+                                      ensure_ascii=False)[:600])
+            except Exception as _de2:  # noqa: BLE001
+                log.debug(f"    发帖后 DOM 诊断失败: {type(_de2).__name__}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"    发帖点击失败: {type(exc).__name__}: {str(exc)[:80]}")
+        return False, "click"
+    finally:
+        try:
+            page.remove_listener("response", _on)
+        except Exception:  # noqa: BLE001
+            pass
+        if probe is not None:
+            try:
+                page.remove_listener("request", _on_req)
+                page.remove_listener("response", _on_resp)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                _pf = ROOT / "output" / f"disc_probe_{lf.get('id')}.json"
+                _pf.write_text(json.dumps(probe, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+                log.info(f"    发帖抓包：{len(probe['req'])} 请求 / "
+                         f"{len(probe['resp'])} 响应 → {_pf.name}")
+                for _r in probe["req"][-10:]:
+                    log.info(f"      {_r['m']} {_r['u'][:120]}")
+                for _r in probe["resp"][-10:]:
+                    log.info(f"      <- {_r['s']} {_r['u'][:120]}")
+            except Exception:  # noqa: BLE001
+                pass
+
+    j = box.get("j") or {}
+    code = j.get("code")
+    if code in (0, "0", 200, "200"):
+        return True, "code=0"
+    # 兜底判定：输入框被清空 = 内容已经发出去了
+    try:
+        after = int(page.evaluate(JS_DISC_TEXT_LEN) or 0)
+    except Exception:  # noqa: BLE001
+        after = n
+    if after < 20 <= n:
+        return True, "输入框已清空"
+    if code is None:
+        return False, "没抓到提交响应"
+    return False, f"code={code}"
+
+
 # ------------------------------------------------------------------
 # 开放式问答题（Group discussion 的 Step 2：Answer the following questions）
 # 题块是 .question-common-abs-reply / .question-inputbox-input 的 textarea，
@@ -2121,7 +2366,7 @@ def _open_leaf(page, url, log, retries: int = 2, backoff_ms: int = 1500) -> bool
 
 
 def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all",
-                 _depth=0):
+                 _depth=0, post_discussion=False):
     """先扫描全页题目，再统一作答，最后按固定顺序点提交。
 
     固定流程：扫描 → 填空/选题 → 提交 → 清理弹窗。
@@ -2150,7 +2395,8 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                 log.debug(f"    Role-play 现场留存失败: {str(_de)[:60]}")
             _clear_modals(page, log)
             return _handle_quiz(session, cfg, log, page, popup, humanizer, lf,
-                                choice_mode, _depth + 1)
+                                choice_mode, _depth + 1,
+                                post_discussion=post_discussion)
         if _role.get("found") and not _role.get("cooldown"):
             log.warning(f"    Role-play：识别到选角色页但没找到 A/B 按钮"
                         f"（{_role.get('why', '未知')}）")
@@ -2471,6 +2717,15 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
         # ③ 讨论/浏览页：用 submitType=2「标记已看」完成，不往讨论区发内容
         #    实测 text（纯文本/词卡类）同样靠这个接口 pass
         if lf.get("tab_type") in ("discussion", "text"):
+            # ③' 真发帖（可选，--quiz-discussion）：
+            #     只标记已看时叶子 pass=1、但所属节的圈永远不蓝；
+            #     平台只认"真的参与过讨论"。开了这个开关就点「发表」。
+            if lf.get("tab_type") == "discussion" and post_discussion:
+                _pok, _pwhy = _post_discussion(page, log, popup, lf)
+                info["posted"] = bool(_pok)
+                info["post_note"] = _pwhy
+                log.info(f"    讨论区真发帖："
+                         f"{'✓ 成功' if _pok else '未成功（' + str(_pwhy) + '）'}")
             from upc import mark_seen as _MS
             ok = _MS.mark_seen(page, log, lf.get("id"))
             log.info(f"    讨论页标记已看：{'✓ 成功' if ok else '未成功'}")
@@ -2777,7 +3032,8 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
             _clear_modals(page, log)
             page.wait_for_timeout(300)
             return _handle_quiz(session, cfg, log, page, popup, humanizer, lf,
-                                choice_mode, _depth + 1)
+                                choice_mode, _depth + 1,
+                                post_discussion=post_discussion)
 
         if not submitted:
             # 没有提交按钮的页面（AI 对话 Talk with AI、纯浏览等）
@@ -2911,7 +3167,23 @@ def _dwell(session, cfg, log, page, seconds, popup, humanizer):
     remain = max(0.0, seconds)
     t0 = time.time()
     last_move = 0.0
+    last_alive = 0.0
     while remain > 0:
+        # ★ 先探活：点过某些按钮（发表/提交/上传）后页面可能进入 JS 忙状态，
+        #   此时 popup.tick 里的 page.evaluate 会**永久挂起**，
+        #   表现为「日志停住、进程不死也不动」——用户报的"卡住"就是它。
+        #   探活用 wait_for_function（有超时），挂住就刷新一次自救。
+        el = time.time() - t0
+        if el - last_alive >= 8:
+            last_alive = el
+            if not _page_alive(page, timeout_ms=4000):
+                log.warning("  页面 JS 无响应，刷新一次自救"
+                            "（否则后续 evaluate 会一直挂着不动）")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(2500)
+                except Exception as _re:  # noqa: BLE001
+                    log.debug(f"  刷新失败: {type(_re).__name__}")
         popup.tick(page)
         session.keep_alive()
         el = time.time() - t0
