@@ -17,11 +17,13 @@ from pathlib import Path
 
 
 class RunState:
-    # 本地判定「程序永远做不完」的叶子（重做纯浪费时长，直接跳过）：
-    #   unsupported_pc = 平台要求 App 端完成
-    #   needs_upload   = 需手动上传作品文件
-    #   needs_manual   = 同一页面反复失败（题型暂不支持），需手动完成
-    SKIP_STATUSES = ("unsupported_pc", "needs_upload", "needs_manual")
+    # 本地判定「程序无需再做」的叶子（重做纯浪费时长，直接跳过）：
+    #   unsupported_pc        = 平台要求 App 端完成
+    #   needs_upload          = 需手动上传作品文件
+    #   needs_manual          = 同一页面反复失败（题型暂不支持），需手动完成
+    #   submitted_subjective  = 作品/录音题已交卷（平台不即时判分，等老师评分）
+    SKIP_STATUSES = ("unsupported_pc", "needs_upload", "needs_manual",
+                     "submitted_subjective")
 
     def __init__(self, path, ttl_days: float = 7.0, enabled: bool = True,
                  log=None):
@@ -58,8 +60,9 @@ class RunState:
     def cached_status(self, leaf_id) -> str:
         """返回有效期内缓存的跳过状态（''=没缓存）。
 
-        只认 SKIP_STATUSES 两类「程序永远做不完」的结论：
-        unsupported_pc（平台要求 App 端）/ needs_upload（需手动上传作品）。
+        只认 SKIP_STATUSES 里「程序无需再做」的结论：unsupported_pc（平台要求
+        App 端）/ needs_upload（需手动上传作品）/ needs_manual（三振出局）/
+        submitted_subjective（作品题已交卷，等老师评分，重交无意义）。
         其余状态（done/failed）一律以平台自己的 pass 为准，绝不因缓存漏刷。
         """
         if not self.enabled or self.ttl <= 0:

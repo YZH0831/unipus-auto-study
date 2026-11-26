@@ -48,18 +48,23 @@ def t_pick_single_arg():
 
 
 def t_call_packed():
-    assert "JS_PICK_SCOOP" in SRC
-    i = SRC.find("_scoop.JS_PICK_SCOOP,")
-    assert i > 0, "没找到调用处"
-    seg = SRC[i:i + 160]
-    assert '[str(_s["index"]), _ans]' in seg, "调用处要把参数打包成 list"
+    # 2026-11-26：选空逻辑收敛到 upc/scoop.pick_scoop，study_ai 只调它；
+    # evaluate 只能传一个 arg 的打包规则仍在 scoop.py 里。
+    assert "_scoop.pick_scoop(" in SRC, "study_ai 应调用 scoop.pick_scoop"
+    js = (ROOT / "upc" / "scoop.py").read_text(encoding="utf-8")
+    assert "JS_PICK_SCOOP, [str(idx), answer]" in js, \
+        "调用处要把参数打包成 list"
 
 
-def t_open_scoop_hover():
-    js = scoop.JS_OPEN_SCOOP
-    for ev in ("mouseenter", "mouseover"):
-        assert ev in js, f"antd Dropdown 靠 hover 触发，JS_OPEN_SCOOP 要有 {ev}"
-    assert "click()" in js
+def t_open_scoop_click_only():
+    # 旧实现 hover 开、click 又关，菜单永远点不到；新逻辑只在菜单没开时点一次
+    js = scoop.JS_SCOOP_STATE
+    assert "menuOpen" in js, "要先读菜单是否已展开"
+    src = (ROOT / "upc" / "scoop.py").read_text(encoding="utf-8")
+    i = src.find("def pick_scoop")
+    seg = src[i:i + 2200]
+    assert 'if not st.get("menuOpen")' in seg, \
+        "菜单已开时不要再点触发器（否则会把它关掉）"
 
 
 def t_pick_covers_wrapper():
@@ -81,10 +86,11 @@ def t_selfcheck_class():
 
 def t_selfcheck_wired():
     i_sc = SRC.find("①d Review & check 自评表")
+    i_cond = SRC.find('and not info.get("selfcheck")')
     i_ne = SRC.find('log.warning("    页面上有题目但未能识别题型')
-    assert 0 < i_sc < i_ne, "自评表要在「未识别」判定之前处理"
-    seg = SRC[i_ne - 1400:i_ne]
-    assert 'info.get("selfcheck")' in seg, "未识别判定要认可 selfcheck"
+    assert 0 < i_sc < i_cond < i_ne, \
+        "自评表要在「未识别」判定之前处理，且判定条件要认可 selfcheck"
+    seg = SRC[i_cond - 200:i_ne]
     assert 'info.get("scoop")' in seg, "未识别判定要认可 scoop"
     ast.parse(SRC)
 
@@ -95,7 +101,7 @@ def main():
     print("=" * 56)
     check("JS_PICK_SCOOP 解构单参数", t_pick_single_arg)
     check("调用处打包成 list", t_call_packed)
-    check("下拉用 hover 触发", t_open_scoop_hover)
+    check("下拉只在菜单未开时点一次", t_open_scoop_click_only)
     check("候选池选择器覆盖 wrapper", t_pick_covers_wrapper)
     check("自评「已选」不认 primary-color", t_selfcheck_class)
     check("自评表接入在未识别判定之前", t_selfcheck_wired)

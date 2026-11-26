@@ -144,6 +144,122 @@ JS_PICK_SCOOP = r"""
 """
 
 
+# 读某个空当前的状态：是否已选、是否已有菜单展开。
+# ★ 2026-11-26：以前 hover + click 连着做，antd Dropdown 是 hover 触发、
+#   click 又会把它关掉，于是「hover 已经打开 → click 关闭 → 选项点不到」。
+#   现在先看状态，菜单没开才点一次，避免自己把菜单点没。
+JS_SCOOP_STATE = r"""
+(idx) => {
+  const n = document.querySelector('span.fe-scoop[data-scoop-index="' + idx + '"]');
+  if (!n) return {found: false};
+  const trig = n.querySelector('.ant-dropdown-trigger.user-answer');
+  const txt = trig ? trig.querySelector('.user-answer-text') : null;
+  let menuOpen = false;
+  for (const m of document.querySelectorAll('.ant-dropdown')) {
+    const r = m.getBoundingClientRect();
+    const st = getComputedStyle(m);
+    if (r.width > 20 && r.height > 10 && st.display !== 'none'
+        && st.visibility !== 'hidden' && st.opacity !== '0') {
+      menuOpen = true;
+      break;
+    }
+  }
+  return {found: true,
+          empty: !!trig && trig.classList.contains('empty'),
+          text: ((txt && txt.innerText) || '').replace(/\s+/g, ' ').trim(),
+          menuOpen: menuOpen};
+}
+"""
+
+
+def state(page, idx) -> dict:
+    """返回 {found, empty, text, menuOpen}；异常当没找到。"""
+    try:
+        return page.evaluate(JS_SCOOP_STATE, str(idx)) or {"found": False}
+    except Exception:  # noqa: BLE001
+        return {"found": False}
+
+
+def _click_menu_item(page, answer) -> bool:
+    """在已展开的 antd 菜单里按文本真实点击目标选项。
+
+    JS click 对部分 React 组件不生效（合成事件目标不对），改用
+    ElementHandle.click() 走真实鼠标事件；弹层在外面也能点到。
+    """
+    wanted = " ".join(str(answer or "").split())
+    if not wanted:
+        return False
+    for sel in (".ant-dropdown-menu-item", ".ant-select-item-option",
+                ".ant-dropdown li", '[class*="dropdown"] [class*="item"]'):
+        try:
+            items = page.query_selector_all(sel)
+        except Exception:  # noqa: BLE001
+            continue
+        for el in items:
+            try:
+                if not el.is_visible():
+                    continue
+                t = " ".join((el.inner_text() or "").split())
+                if not t or t.lower() != wanted.lower():
+                    continue
+                el.scroll_into_view_if_needed(timeout=1500)
+                el.click(timeout=2500)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
+
+
+def pick_scoop(page, log, idx, answer, tries: int = 2) -> bool:
+    """把一个下拉空选中并回读确认。
+
+    流程：读状态 → 菜单没开才点一次开 → 真实点击选项 → 回读确认。
+    失败会关掉残留菜单重开再试；仍失败返回 False（由调用方计未作答）。
+    """
+    if not answer:
+        return False
+    for attempt in range(max(1, tries)):
+        st = state(page, idx)
+        if not st.get("found"):
+            return False
+        # 已经选上了（可能上一轮已成功）→ 直接算成功
+        if not st.get("empty"):
+            return True
+        if not st.get("menuOpen"):
+            try:
+                trig = page.query_selector(
+                    f'span.fe-scoop[data-scoop-index="{idx}"] '
+                    ".ant-dropdown-trigger.user-answer")
+                if trig is not None:
+                    trig.scroll_into_view_if_needed(timeout=2000)
+                    trig.click(timeout=3000)
+            except Exception as exc:  # noqa: BLE001
+                log.debug(f"    下拉空{idx} 展开失败: {str(exc)[:60]}")
+        page.wait_for_timeout(450 + 250 * attempt)
+        if _click_menu_item(page, answer):
+            page.wait_for_timeout(250)
+            st2 = state(page, idx)
+            if st2.get("found") and not st2.get("empty"):
+                return True
+        # 兜底：菜单项被透明遮罩挡住时，真实点击会超时，用 JS 选一次
+        try:
+            r = page.evaluate(JS_PICK_SCOOP, [str(idx), answer]) or {}
+            if r.get("ok"):
+                page.wait_for_timeout(250)
+                st3 = state(page, idx)
+                if st3.get("found") and not st3.get("empty"):
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        # 关掉可能残留的菜单，下一轮重新点开
+        try:
+            page.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
+        page.wait_for_timeout(200)
+    return False
+
+
 def parse_scoops_from_html(html: str) -> list:
     """从离线 HTML 文本解析下拉空（供单测用，不依赖浏览器）。"""
     out = []
@@ -175,6 +291,17 @@ def build_llm_prompt(scoops: list, page_text: str = "") -> str:
     return prompt
 
 
+def _norm_opt(text: str) -> str:
+    """候选/答案归一化：压缩空白、小写、去掉首尾标点。
+
+    ★ 2026-11-26 实测：候选是 "mountains of Colorado in the U.S.A."，
+    模型答同样的词时末尾句点常被 `strip(".,;:")` 吃掉，严格相等会判不中，
+    整个空被跳过（3 个空只选 2 个）。这里只忽略首尾标点，词内不动。
+    """
+    s = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    return s.strip(" .,;:!?'\"")
+
+
 def parse_llm_answers(raw: str, scoops: list) -> list:
     """把大模型返回的 'do|make|...' 按空号解析；不在候选里的丢弃。"""
     if not raw:
@@ -189,7 +316,7 @@ def parse_llm_answers(raw: str, scoops: list) -> list:
             # 去掉模型可能带的 "答案:" 前缀
             cand = re.sub(r"^(?:答案|answer)\s*[:：]?\s*", "", cand, flags=re.I)
             for o in opts:
-                if cand.lower() == o.lower():
+                if _norm_opt(cand) == _norm_opt(o):
                     ans = o
                     break
         answers.append(ans)

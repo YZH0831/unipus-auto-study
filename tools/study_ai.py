@@ -478,6 +478,8 @@ def main():
                     _cat = "upload"
                 elif _st == "needs_manual":
                     _cat = "manual"
+                elif _st == "submitted_subjective":
+                    _cat = "submitted"
                 else:
                     _cat = "todo"
                 _rows.append((_i, _lf, _cat))
@@ -487,10 +489,11 @@ def main():
                 _cnt[_r[2]] = _cnt.get(_r[2], 0) + 1
             _label = {"done": "已完成", "todo": "待做（程序能做）",
                       "app": "只能 App 端", "upload": "需上传作品",
-                      "manual": "题型不支持（需手动）"}
+                      "manual": "题型不支持（需手动）",
+                      "submitted": "已交卷（等老师评分）"}
             log.info("=" * 62)
             log.info(f"未完成清单：共 {len(_rows)} 个叶子")
-            for _k in ("done", "todo", "app", "upload", "manual"):
+            for _k in ("done", "todo", "app", "upload", "manual", "submitted"):
                 if _cnt.get(_k):
                     log.info(f"  {_label[_k]:<18} {_cnt[_k]:>3} 个")
             log.info("=" * 62)
@@ -504,7 +507,7 @@ def main():
 
             md = [f"# 未完成清单（共 {len(_rows)} 个叶子）", "",
                   "| 分类 | 数量 |", "|---|---|"]
-            for _k in ("done", "todo", "app", "upload", "manual"):
+            for _k in ("done", "todo", "app", "upload", "manual", "submitted"):
                 if _cnt.get(_k):
                     md.append(f"| {_label[_k]} | {_cnt[_k]} |")
             md.append("")
@@ -623,6 +626,12 @@ def main():
                     elif _skip_st == "needs_manual":
                         log.debug(f"  跳过反复失败的项（三振出局）: {lf.get('name')}")
                         report.append({**lf, "status": "skipped_needs_manual"})
+                    elif _skip_st == "submitted_subjective":
+                        # 作品/录音题已交卷，平台要等老师评分；重交既改不了分
+                        # 也会被当成重复提交，直接跳过。
+                        log.debug(f"  跳过已交卷待评的主观题: {lf.get('name')}")
+                        report.append({**lf,
+                                       "status": "skipped_submitted_subjective"})
                     else:
                         log.debug(f"  跳过本地缓存的 App 端项: {lf.get('name')}")
                         report.append({**lf,
@@ -728,6 +737,11 @@ def main():
                 #   每次失败计一振（历史现场 dump 已预置 2 振），
                 #   满 3 振标记 needs_manual，后续轮次连页面都不再打开。
                 manual_out = False
+                # ★ 每个叶子单独初始化：PC 跳过 / 上传跳过时不会进下面的
+                #   if 分支，若不初始化会用到「上一个叶子」的 quiz_failed，
+                #   既可能误判成 incomplete，也可能在整轮第一个叶子就报
+                #   UnboundLocalError。
+                quiz_failed = False
                 if not pc_skip and not up_skip:
                     # 未识别题型但"标记已看"成功 → 平台已给 pass，不再计失败/
                     # 三振（自评表 Got it/Review、词卡浏览页都属于这类）。
@@ -744,7 +758,10 @@ def main():
                                 and not pc_skip and not up_skip)
                             # 题库已有标准答案仍 0 分 / 第二遍仍全错：
                             # 重做也救不回来（如全答全错的人物匹配页）
+                            # ★ 作品/录音题已交卷（subjective_accepted）除外：
+                            #   这类题平台不即时判分，scorePct=0 是常态，不是失败。
                             or (quiz_info.get("score") == 0
+                                and not quiz_info.get("subjective_accepted")
                                 and (_pass >= 1
                                      or str(lf.get("id")) in bank_answered))))
                     _failed_now = quiz_failed
@@ -864,6 +881,14 @@ def main():
                 if up_skip:
                     rec["status"] = "needs_upload"
                     rec["needs_upload"] = True
+                # ★ 作品/录音题：平台已收卷但 scorePct=0（等老师评分）。
+                #   记成「已交卷待评」，不参与三振、不在第二遍重做。
+                _sub_accepted = bool(quiz_info
+                                     and quiz_info.get("subjective_accepted")
+                                     and not quiz_failed)
+                if _sub_accepted:
+                    rec["status"] = "submitted_subjective"
+                    rec["submitted_subjective"] = True
                 if manual_out:
                     rec["status"] = "needs_manual"
                     rec["needs_manual"] = True
@@ -877,7 +902,8 @@ def main():
                            "needs_manual" if manual_out else
                            ("unsupported_pc" if pc_skip else
                             ("needs_upload" if up_skip else
-                             ("incomplete" if quiz_failed else "done"))),
+                             ("submitted_subjective" if _sub_accepted else
+                              ("incomplete" if quiz_failed else "done")))),
                            lf.get("name"))
                 extra = ""
                 if quiz_info:
@@ -897,7 +923,9 @@ def main():
                         mark = f"○ 本节「{lf.get('micro')}」仍白圈"
                 elif blue_delta > 0:
                     mark = "● 蓝圈+1"
-                _verb = "未完成" if rec["status"] == "incomplete" else "完成"
+                _verb = ("未完成" if rec["status"] == "incomplete"
+                         else ("已交卷" if rec["status"] == "submitted_subjective"
+                               else "完成"))
                 log.info(f"  {_verb}（媒体={'有' if played else '无'}{extra}） {mark}")
 
             out = Path(cfg.output_dir) / "study_ai_report.json"
@@ -916,6 +944,10 @@ def main():
             upload_skips = sum(1 for r in report
                                if r.get("status") in
                                ("needs_upload", "skipped_needs_upload"))
+            submitted_list = [r.get("name") for r in report
+                              if r.get("status") == "submitted_subjective"]
+            submitted_skips = sum(1 for r in report if r.get("status") ==
+                                  "skipped_submitted_subjective")
             # ★ 口语题成绩汇总：口语分来自 SOE 评测（info["voice"]=True），
             #   和客观题的题库标准答案分开统计，跑完一轮能一眼看清口语真实分数。
             voice_scores = []
@@ -936,6 +968,9 @@ def main():
                                        "cached_skips": cached_skips,
                                        "manual_skips": manual_skips,
                                        "upload_skips": upload_skips,
+                                       "submitted_subjective": submitted_list,
+                                       "submitted_subjective_skips":
+                                           submitted_skips,
                                        "voice_scores": voice_scores,
                                        "tasks": report},
                                       ensure_ascii=False, indent=2), encoding="utf-8")
@@ -949,6 +984,13 @@ def main():
                 log.info(f"题目未完成、计入未完成：{len(incomplete_list)} 项（下轮会重试）")
             if upload_skips:
                 log.info(f"需手动上传作品：{upload_skips} 项（已跳过）")
+            if submitted_list or submitted_skips:
+                log.info(f"主观题已交卷（平台等老师评分，无需再跑）：本轮交卷 "
+                         f"{len(submitted_list)} 项 / 缓存跳过 {submitted_skips} 项")
+                if submitted_list:
+                    log.info("  交卷项：" + "、".join(
+                        str(x)[:20] for x in submitted_list[:10]) +
+                        ("…" if len(submitted_list) > 10 else ""))
             if manual_out_list or manual_skips:
                 log.info(f"三振出局（反复失败、需手动完成）：本轮出局 "
                          f"{len(manual_out_list)} 项 / 缓存跳过 {manual_skips} 项"
@@ -1149,8 +1191,10 @@ JS_SCAN = r"""
 """
 
 # Role-play 的「Step 1 / Choose a role  A  B」选角色页。
-# 现场 dump 里 A/B 被采集规则滤掉了，所以按可见文本找可点击元素，
-# 不依赖具体 class；点完角色后页面会进入 Step 2，需要递归重新扫描。
+# ★ 2026-11-26：以前按 innerText=='A' 抓到的是 `.role` 大容器，点它可能被
+#   swiper 当成翻页手势，直接翻到空白 slide；之后整页文本仍含 "Choose a role"
+#   （离屏 slide 的文本），于是被误判成「Role-play 停在选角页、PC 端不支持」。
+#   现在只点最内层的 label/span，并配合 JS_ROLE_STATE 判断是否真的离开了选角页。
 JS_ROLE_PICK = r"""
 () => {
   const body = document.body.innerText || '';
@@ -1159,21 +1203,70 @@ JS_ROLE_PICK = r"""
   if (Date.now() - (window.__rolePickedAt || 0) < 8000) {
     return {found: true, picked: '', cooldown: true};
   }
-  const cands = [];
-  for (const e of document.querySelectorAll(
-      'button,a,[role="button"],[class*="btn"],label,span,div,li')) {
-    const s = (e.innerText || '').trim();
-    if (s !== 'A' && s !== 'B') continue;
-    const r = e.getBoundingClientRect();
-    if (r.width < 8 || r.height < 8) continue;
-    cands.push({e: e, s: s});
+  const picks = [];
+  for (const r of document.querySelectorAll('.role-list .role')) {
+    const lab = r.querySelector('label.label') || r.querySelector('label');
+    const span = lab ? lab.querySelector('span') : null;
+    const icon = r.querySelector('.svg-icon');
+    const txt = ((lab && lab.innerText) || r.innerText || '')
+                  .replace(/\s+/g, ' ').trim();
+    if (txt !== 'A' && txt !== 'B') continue;
+    picks.push({txt: txt, span: span, lab: lab, icon: icon, role: r});
   }
-  if (!cands.length) return {found: true, picked: '', why: 'no A/B element'};
-  const hit = cands.find(x => x.s === 'A') || cands[0];
-  try { hit.e.click(); }
-  catch (err) { return {found: true, picked: '', why: String(err)}; }
+  if (!picks.length) {
+    for (const e of document.querySelectorAll(
+        'label,span,button,a,[role="button"],[class*="btn"]')) {
+      const s = (e.innerText || '').trim();
+      if (s !== 'A' && s !== 'B') continue;
+      const r = e.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) continue;
+      picks.push({txt: s, span: e});
+    }
+  }
+  if (!picks.length) return {found: true, picked: '', why: 'no A/B element'};
+  const hit = picks.find(x => x.txt === 'A') || picks[0];
+  const t = hit.span || hit.lab || hit.icon || hit.role;
+  try {
+    if (t.scrollIntoView) t.scrollIntoView({block: 'center'});
+    t.click();
+  } catch (err) { return {found: true, picked: '', why: String(err)}; }
   window.__rolePickedAt = Date.now();
-  return {found: true, picked: hit.s, n: cands.length};
+  return {found: true, picked: hit.txt, n: picks.length};
+}
+"""
+
+# 选角页到底还在不在：用「可见矩形」判断，而不是整页 innerText
+# （swiper 里离屏的 Step 1 文本一直存在，按文本判会永远为真）。
+JS_ROLE_STATE = r"""
+() => {
+  const picker = document.querySelector('.select-mode-role-wrapper');
+  const quiz = document.querySelector('.role-play-quiz');
+  const rec = document.querySelector('.button-record, .record-button-wrap');
+  let vis = false;
+  if (picker) {
+    const r = picker.getBoundingClientRect();
+    vis = r.width > 8 && r.height > 8 && r.bottom > 0 && r.top < innerHeight
+          && r.right > 0 && r.left < innerWidth;
+  }
+  return {picker: !!picker, pickerVisible: vis,
+          quiz: !!quiz, recorder: !!rec};
+}
+"""
+
+# 选角页被翻到离屏（swiper 停在空白 slide）时，退回第 1 页。
+JS_SWIPER_BACK = r"""
+() => {
+  const el = document.querySelector(
+      '.role-play-wrapper .swiper-container, .role-play-wrapper .swiper');
+  if (el && el.swiper && typeof el.swiper.slideTo === 'function') {
+    try { el.swiper.slideTo(0); return {ok: true, via: 'swiper'}; } catch (e) {}
+  }
+  const wrap = document.querySelector('.role-play-wrapper .swiper-wrapper');
+  if (wrap) {
+    wrap.style.transform = 'translate3d(0, 0, 0)';
+    return {ok: true, via: 'css'};
+  }
+  return {ok: false};
 }
 """
 
@@ -2446,6 +2539,81 @@ def _open_leaf(page, url, log, retries: int = 2, backoff_ms: int = 1500) -> bool
     return False
 
 
+def _pick_roleplay_role(page, log):
+    """Role-play Step 1 选角。返回 True=本次真的点了角色并离开了选角页。
+
+    ★ 2026-11-26 现场教训：旧逻辑按 innerText=='A' 抓到的是 `.role` 大容器，
+      点它可能被 swiper 当成翻页手势，直接翻到空白 slide；之后再怎么点都
+      点不动，而整页 innerText 仍包含离屏 Step 1 的 "Choose a role"，于是
+      被误判成「Role-play 停在选角页、PC 端不支持」。这里：
+        1) 只点 label/span 最内层；
+        2) 用可见矩形判断选角页是否还在（不看整页文本）；
+        3) 选角页被翻到离屏且没有 Step 2 内容时，先把 swiper 退回第 1 页。
+    """
+    try:
+        st = page.evaluate(JS_ROLE_STATE) or {}
+    except Exception:  # noqa: BLE001
+        return False
+    if not st.get("picker"):
+        return False
+    if not st.get("pickerVisible"):
+        # 已经在 Step 2（选角页只是离屏残留）→ 不需要再选
+        if st.get("quiz") or st.get("recorder"):
+            return False
+        # 确实是翻到了空白 slide：退回第 1 页
+        try:
+            page.evaluate(JS_SWIPER_BACK)
+            page.wait_for_timeout(600)
+            st = page.evaluate(JS_ROLE_STATE) or {}
+        except Exception:  # noqa: BLE001
+            pass
+        if not st.get("pickerVisible"):
+            return False
+
+    for attempt in range(2):
+        try:
+            r = page.evaluate(JS_ROLE_PICK) or {}
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"    Role-play 选角异常: {str(exc)[:60]}")
+            r = {}
+        if r.get("picked"):
+            log.info(f"    Role-play：已选角色 {r['picked']}"
+                     f"（候选 {r.get('n', 1)} 个），等待进入 Step 2")
+            page.wait_for_timeout(1800)
+            st = page.evaluate(JS_ROLE_STATE) or {}
+            if not st.get("pickerVisible") or st.get("quiz"):
+                return True
+        # 兜底：真实鼠标点 label（JS click 被组件吞掉时）
+        try:
+            for el in page.query_selector_all(".role-list .role label.label"):
+                txt = " ".join((el.inner_text() or "").split())
+                if txt not in ("A", "B"):
+                    continue
+                el.scroll_into_view_if_needed(timeout=2000)
+                el.click(timeout=3000)
+                page.wait_for_timeout(1500)
+                st = page.evaluate(JS_ROLE_STATE) or {}
+                if not st.get("pickerVisible") or st.get("quiz"):
+                    log.info(f"    Role-play：真实点击选中角色 {txt}")
+                    return True
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"    Role-play 真实点击失败: {str(exc)[:60]}")
+        # 还在选角页 → 可能又被翻到空白 slide，退回去再来一次
+        try:
+            page.evaluate(JS_SWIPER_BACK)
+            page.wait_for_timeout(600)
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        st = page.evaluate(JS_ROLE_STATE) or {}
+    except Exception:  # noqa: BLE001
+        st = {}
+    if st.get("pickerVisible"):
+        log.warning("    Role-play：选角页 A/B 均无响应（点不动）")
+    return False
+
+
 def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all",
                  _depth=0, post_discussion=False):
     """先扫描全页题目，再统一作答，最后按固定顺序点提交。
@@ -2457,14 +2625,10 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
     # 被「页面上有题目但未能识别题型」拦下不提交，多页题就卡死在这页。
     # 选完角色页面会进入 Step 2，必须递归重新扫描一次。
     if _depth < 6:
-        try:
-            _role = page.evaluate(JS_ROLE_PICK) or {}
-        except Exception as _exc:  # noqa: BLE001
-            _role = {}
-        if _role.get("picked"):
-            log.info(f"    Role-play：已选角色 {_role['picked']}"
-                     f"（候选 {_role.get('n', 1)} 个），重新扫描后续步骤")
-            page.wait_for_timeout(1200)
+        _role_picked = _pick_roleplay_role(page, log)
+        if _role_picked:
+            log.info("    Role-play：角色已选，重新扫描 Step 2")
+            page.wait_for_timeout(600)
             try:
                 _d = page.evaluate(JS_DUMP_UNKNOWN) or {}
                 (ROOT / "output" /
@@ -2478,9 +2642,6 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
             return _handle_quiz(session, cfg, log, page, popup, humanizer, lf,
                                 choice_mode, _depth + 1,
                                 post_discussion=post_discussion)
-        if _role.get("found") and not _role.get("cooldown"):
-            log.warning(f"    Role-play：识别到选角色页但没找到 A/B 按钮"
-                        f"（{_role.get('why', '未知')}）")
     # 转录文本（听力原文）——填空和选择题都要用，先取出来
     trans = (_transcripts().get(lf.get("id")) or {}).get("text", "")
     if not trans:
@@ -2559,45 +2720,38 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                     _answers = [str(b[0]).strip() if isinstance(b, list) and b else ""
                                 for b in _sbench]
                     log.info("    下拉填空题库命中(分组)")
-                _picked = 0
+                _ans_by_idx = {}
                 for _s, _ans in zip(_scoops, _answers):
-                    if not _ans:
-                        continue
-                    try:
-                        # ① 真实鼠标 hover（antd Dropdown 主要吃 mouseenter）
-                        try:
-                            _trig = page.query_selector(
-                                f'span.fe-scoop[data-scoop-index="{_s["index"]}"] '
-                                ".ant-dropdown-trigger.user-answer")
-                            if _trig is not None:
-                                _trig.scroll_into_view_if_needed(timeout=2000)
-                                _trig.hover(timeout=3000)
-                                page.wait_for_timeout(500)
-                        except Exception:  # noqa: BLE001
-                            pass
-                        # ② 兜底：JS 派发全套鼠标事件 + click
-                        page.evaluate(_scoop.JS_OPEN_SCOOP, str(_s["index"]))
-                        page.wait_for_timeout(350)
-                        # evaluate 只能传一个 arg：打包成 [idx, answer]
-                        _r2 = page.evaluate(_scoop.JS_PICK_SCOOP,
-                                            [str(_s["index"]), _ans])
-                        if _r2 and _r2.get("ok"):
-                            _picked += 1
-                            page.wait_for_timeout(200)
-                        else:
-                            # 没选上 → 把这个空的候选词和当前可见菜单打出来校准
+                    if _ans:
+                        _ans_by_idx[str(_s["index"])] = _ans
+                _done_idx = set()
+                _left = _scoops
+                for _round in (0, 1):
+                    if _round:
+                        # 第一轮没选上的空重扫一遍再补一次（菜单动画/遮罩会让
+                        # 个别空偶发失败，没必要因此把整题判「未作答」）
+                        _left = page.evaluate(_scoop.JS_SCAN_SCOOPS) or []
+                    for _s in _left:
+                        _idx = str(_s["index"])
+                        _ans = _ans_by_idx.get(_idx)
+                        if not _ans:
+                            continue
+                        if _scoop.pick_scoop(page, log, _idx, _ans):
+                            _done_idx.add(_idx)
+                            log.info(f"    空{_idx} ← {_ans!r}")
+                            continue
+                        if _round:
+                            # 两次都没选上 → 打出现场用于校准选择器
                             try:
                                 _menu = page.evaluate(
                                     _scoop.JS_DUMP_SCOOP_MENU) or []
-                                log.info(f"    空{_s['index']} 选不上"
+                                log.info(f"    空{_idx} 两次都没选上"
                                          f"（想选 {_ans!r}，候选 "
-                                         f"{_s.get('options')}）"
-                                         f"可见菜单: "
+                                         f"{_s.get('options')}）可见菜单: "
                                          f"{json.dumps(_menu, ensure_ascii=False)[:300]}")
                             except Exception:  # noqa: BLE001
                                 pass
-                    except Exception as exc:  # noqa: BLE001
-                        log.debug(f"    下拉空{_s['index']} 选择失败: {str(exc)[:60]}")
+                _picked = len(_done_idx)
                 info["scoop"] = _picked
                 info["answered"] = info.get("answered", 0) + _picked
                 if _picked < len(_scoops):
@@ -2926,9 +3080,18 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
             # 主流程也别停留计时 / 回退重做整节。
             _page_text = _d.get("text") or ""
             _pc_bad = is_pc_unsupported(_page_text)
-            if _pc_bad or is_roleplay_stuck(_page_text):
+            # ★ 只认「选角页当前可见」：swiper 里离屏的 Step 1 文本一直存在，
+            #   用整页文本判会把已经进入 Step 2 的页面误判成「卡在选角页」。
+            _role_visible = False
+            try:
+                _rs = page.evaluate(JS_ROLE_STATE) or {}
+                _role_visible = bool(_rs.get("picker")
+                                     and _rs.get("pickerVisible"))
+            except Exception:  # noqa: BLE001
+                _role_visible = False
+            if _pc_bad or _role_visible:
                 _why = ("平台提示 PC 端不支持" if _pc_bad
-                        else "Role-play 停在选角页、进不了 Step 2")
+                        else "Role-play 选角页 A/B 点了没反应")
                 log.info(f"    {_why}，本项跳过（PC 端无法完成）")
                 info["unsupported_pc"] = True
                 info["skip_reason"] = _why
@@ -3167,6 +3330,16 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
                 log.debug(f"    标记已看兜底失败: {str(exc)[:60]}")
         if not submitted:
             log.warning("    ⚠ 没找到提交按钮，本次作答未提交")
+        # ★ 作品/录音上传题：平台收卷后不会即时判分（scorePct 常为 0，
+        #   等老师评分）。只要确实点了提交、且没提示「还有题未作答」，
+        #   就按「已交卷」处理——否则第二遍重做会再判 0，三振成 needs_manual
+        #   （实测 8 项 Group discussion / Step 2 作品题全被误判）。
+        if (info.get("uploaded") and submitted
+                and submitted != "标记已看"
+                and not info.get("incomplete")
+                and not info.get("unrecognized")):
+            info["subjective_accepted"] = True
+            log.info("    作品题已交卷（平台不即时判分，按完成处理，不再重做）")
         info["submitted"] = submitted
         info["score"] = score
         info["std_answers"] = std_letters
