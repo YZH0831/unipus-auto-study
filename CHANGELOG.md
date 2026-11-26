@@ -1,5 +1,121 @@
 # 更新日志
 
+## v1.1.8 — 2026-11-26（WorkBuddy）
+
+新增 `mobile/`：**真机自动化**，专治 PC 端做不了的 `ai-spoken`（Talk with AI 1~4）。
+不修改任何 `upc/`、`tools/` 业务代码，与 v1.1.7 的 PC 端修复互不重叠。
+
+### 为什么必须用手机（本次调研的硬结论）
+
+- PC 包里 Talk with AI 是**硬编码空壳组件**：`question-pc-556fc926.js` 里
+  `render(){ return c.createElement("div",{...},"该题型暂不支持pc端，请在app端查看") }`。
+  → 换移动 UA、改 `appid`、试移动皮肤包**全部无效**（`_explorationmobile_*` /
+  `_explorationwap_*` / `_explorationapp_*` 均 404，皮肤只有 pc 两种）。
+- 后端接口 PC/移动**完全一致**（`/studio/assistant/*` 共 11 个端点），
+  端限制只在前端 UI 层；但 `ebcp/auth` 所需鉴权参数只有 App 端有，
+  且 Android 16 默认不信任用户证书、未 root 抓不到 HTTPS，故走真机操作。
+
+### 新增
+
+- `mobile/`：ADB + uiautomator 手机操作
+  - `mobile_uia.py`：按文字/坐标点击、dump 界面树、截图、滑动等基础动作
+  - `talk.py`：对话页状态机（idle / recording / preview / error）+ 自动重试
+  - `auto_twai.py`：从题目页一键做完一整题（选角→对话→结束→评价→提交→返回目录）
+  - `try_voice.py`：单句喂音实验
+  - `adbenv.py`：adb / ffmpeg / python 路径探测，支持 `ADB_PATH` 等环境变量覆盖
+- 音频链路：`edge-tts`（en-US-AriaNeural）→ `ffmpeg` 转 wav → **电脑扬声器**播放
+  → 手机麦克风收音。用电脑发声可绕开手机自身的回声消除（AEC 只消自己的扬声器）。
+
+### 实测
+
+- Unit 1 / Unit 2 的 Talk with AI 1、2 共 **4 题全部提交成功**，目录状态变「已完成」。
+- 答题小结显示：该类题**不计入教程学习成绩**、**非必修**，
+  只要「主观题已作答 1/1」即完成 —— 语音识别分数（实测 59）不影响任何成绩。
+- 交互坑位已记入 `mobile/README.md`（必须先点选 Role / 「重录」会立刻开录 /
+  ViewPager 需 `duration<=100ms` 快滑 等）。
+
+### 工具侧
+
+- 新增只读探针：`tools/mobile_probe.py`（皮肤/UA 探测）、`mobile_probe2.py`
+  （前端 bundle 静态分析）、`mobile_probe4.py`（ai-people SDK 接口对比）、
+  `analyze_ai_node.py`（`ai-spoken` 节点结构）。均为调研用，可随时删除。
+
+## v1.1.7 — 2026-11-26（Trae）
+
+集中清理运行中「需要人工」的三类误判。改完时刷课进程已停（WorkBuddy 21:30 停的），
+代码已落盘，可续跑；离线测试全绿。
+
+### 修复 1：作品/录音上传题被三振出局（8 项误判）
+
+Group discussion / Step 2 / Discussion 这类「录音或作品上传」题，平台收卷后
+不会即时判分（`scorePct=0`，等老师评分）。旧逻辑把 0 分当失败，第二遍重做再判 0，
+累计三振 → `needs_manual`；实际 12:54 的日志里早已「提交后提示: 成功」、
+本节蓝圈也亮了。
+
+- `_handle_quiz` 新增 `subjective_accepted`：上传成功 + 提交成功 + 平台没拦
+  「还有题未作答」→ 按「已交卷」处理；
+- 三振判定里的 `score == 0` 条件排除已交卷作品题；
+- `RunState` 新增 `submitted_subjective` 状态：后续轮次直接跳过，不在第二遍重做；
+- 报告/日志/`--leftover` 增加「已交卷（等老师评分）」分类。
+- 预计解除：Interviewing a famous person、Step 2、Making a radio program、
+  Reporting on a sports survey、Introducing a town / city、Discussion、
+  Talking about a great invention、Talking about a natural wonder。
+- 顺带修掉一个隐性 bug：`quiz_failed` 以前只在「非 PC/上传跳过」分支里赋值，
+  PC/上传项会沿用**上一个叶子**的值（整轮第一个叶子甚至会 `UnboundLocalError`）；
+  现在每个叶子先初始化 `False`。
+
+### 修复 2：下拉选词「hover 开、click 又关」
+
+旧逻辑先真实 `hover`（antd Dropdown 打开菜单）再 `click`（又关掉），选项永远点不到；
+只有 hover 没生效的空才碰巧选中，所以同一页出现 3/6、5/6 这种诡异结果。
+
+- 新增 `upc/scoop.py::pick_scoop`：先读 `JS_SCOOP_STATE` 的 `menuOpen`，
+  **菜单没开才点一次**触发器；选项用 `ElementHandle.click()` 真实点击；
+- 选完回读 `user-answer` 状态确认，没选中自动重开重试（最多 2 轮）；
+- `study_ai` 第一轮没选上的空会重扫一遍再补一次，失败才计「未作答」。
+- 顺带修掉答案解析的末尾标点问题：候选 `mountains of Colorado in the U.S.A.`
+  被模型原样答出时，旧解析把末尾句点 strip 掉后严格相等失败，整个空被跳过
+  （实测 3 空只选 2 个）；现在比较时忽略首尾标点，填回仍用候选原文。
+
+### 修复 3：Role-play 选角页被误判「PC 端不支持」
+
+旧逻辑按 `innerText == 'A'` 抓到的是 `.role` 大容器，点它可能被 swiper 当成翻页，
+翻到空白 slide；而整页 innerText 一直包含离屏 Step 1 的 "Choose a role"，
+于是被判「Role-play 停在选角页、PC 端无法完成」（Exercise 3 因此进了 7 天缓存）。
+
+- `JS_ROLE_PICK` 只点最内层 `label/span`，不再点 `.role` 容器；
+- 新增 `JS_ROLE_STATE`：用**可见矩形**判断选角页是否还在，替代整页文本判断；
+- 新增 `JS_SWIPER_BACK` + `_pick_roleplay_role`：被翻到空白 slide 时先退回第 1 页，
+  JS 点击失败再用真实鼠标点 `label.label`，都不行才判失败。
+
+### 测试
+
+- 新增 `tests/test_manual_fixes.py`（15 项：交卷状态跨进程、三振排除、
+  跳过/报告、quiz_failed 初始化、下拉开合/重试/末尾标点、选角 JS 目标、
+  Step 2 不误退、swiper 回退、可见性判定）；
+- `tests/test_selfcheck_scoop.py` 同步更新为 `pick_scoop` 接入；
+- `test_offline` 29/29、`test_selfheal_fix` 10/10、`test_voice_score_report` 6/6、
+  `test_retry_burn` 5/5、`test_upload_flow` 9/9、`test_selfcheck_scoop` 6/6、
+  `test_manual_fixes` 15/15 全绿；改动文件 `py_compile` 通过。
+
+### 实跑验证
+
+- `--book vls --micro 18 --passes 1 --retry-manual`（Unit 2 Viewing world cultures）：
+  `Before you view` 原来卡在「下拉还有 1 个空没选上」三振出局；本次最后一个空
+  `mountains of Colorado in the U.S.A.` 一次选中，提交成功，`scorePct=0.667`，
+  **本节蓝圈点亮**，叶子状态 `done`，未再计失败。
+- 说明：0.667 是历史遗留的 2 个错选（本次只补了空着的那个）；平台已按 pass
+  处理并点亮蓝圈，说明该题不要求 1.0。题库已沉淀 6 组标准答案，下轮 `--redo-low`
+  可补满分。
+
+### 仍未自动化（平台限制，勿重复排查）
+
+- **Talk with AI 1~4**：PC 包里是硬编码空壳组件（WorkBuddy 已定位到
+  `question-pc-556fc926.js`），换 UA/皮肤包无效；后端接口与移动端相同，
+  由 WorkBuddy 走 `/studio/assistant/...` 接口路线，接入点见 `COLLAB.md`。
+- **讨论区「发表」按钮**：PC 端点击 0 请求（v1.1.5 已实测），只能手机 App 发帖。
+- 作品题「已交卷」不等于老师给分；分数仍以平台为准。
+
 ## v1.1.6 — 2026-11-25
 
 修掉两个"被判做不了"的题型：Review & check 自评表、Collocation 下拉选词。
