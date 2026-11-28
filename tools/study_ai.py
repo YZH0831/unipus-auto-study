@@ -183,6 +183,9 @@ def main():
     ap.add_argument("--retry-burn-reset", action="store_true",
                     help="清空「整节真播重做也点不亮」的本地记录，"
                          "让这些节下次重新回退重做一次（平台改版后用）")
+    ap.add_argument("--retry-pc", action="store_true",
+                    help="解除全部「PC 端不支持」缓存，让 ai-spoken 等项重新尝试"
+                         "（新版会先试「标记已看」，成功即算完成）")
     args = ap.parse_args()
 
     from upc import video as V
@@ -214,6 +217,10 @@ def main():
             _b = state.reset_retry_burns()
             log.info(f"[--retry-burn-reset] 已清空 {_b} 个"
                      "「真播重做也点不亮」的节记录")
+        if getattr(args, "retry_pc", False):
+            _p = state.reset_pc_unsupported()
+            log.info(f"[--retry-pc] 已解除 {_p} 个「PC 端不支持」缓存，"
+                     "本轮重新尝试（先试标记已看）")
         if state.burned_count:
             log.info(f"本地记录：{state.burned_count} 个节确认过"
                      "「真播重做点不亮」，本轮不再回退重做（省时长）")
@@ -3092,6 +3099,23 @@ def _handle_quiz(session, cfg, log, page, popup, humanizer, lf, choice_mode="all
             if _pc_bad or _role_visible:
                 _why = ("平台提示 PC 端不支持" if _pc_bad
                         else "Role-play 选角页 A/B 点了没反应")
+                # ★ 2026-11-27：ai-spoken（Talk with AI）页面虽然写着「PC 端不支持」，
+                #   但平台对这类 task 叶子只校验「主观题已作答」，用 submitType=2
+                #   「标记已看」就能把 pass 置 1（实测 Unit1 Talk with AI 1 → pass=1）。
+                #   所以先试标记已看，平台接受就不算「做不了」。
+                if _pc_bad:
+                    try:
+                        from upc import mark_seen as _MSp
+                        if _MSp.mark_seen(page, log, lf.get("id")):
+                            log.info("    页面提示「PC 端不支持」，但「标记已看」"
+                                     "已被平台接受 ✓（按完成处理）")
+                            info["mark_seen"] = True
+                            info["submitted"] = "标记已看"
+                            info["unsupported_pc"] = False
+                            page.wait_for_timeout(1200)
+                            return info
+                    except Exception as _mpe:  # noqa: BLE001
+                        log.debug(f"    标记已看尝试失败: {str(_mpe)[:60]}")
                 log.info(f"    {_why}，本项跳过（PC 端无法完成）")
                 info["unsupported_pc"] = True
                 info["skip_reason"] = _why

@@ -14,6 +14,7 @@ POST /course/api/v3/newExploration/submit 即返回 code:0，
 state/submit_headers.json。
 """
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -66,13 +67,36 @@ def load_headers():
     return d.get("hdr"), d.get("base")
 
 
-def mark_seen(page, log, group_id, hdr=None, base=None):
+def _course_id_from_page(page):
+    """从课件页 URL 的 hash 里取当前课程实例（course-v2:...）。
+
+    ★ 缓存模板里的 courseId 是当初抓包那本书的（实测固定为「视听说」）。
+      换到另一本书（如读写）后仍然带着它提交，接口照样返回 code:0，
+      但写的是另一本书，当前叶子永远 pass=0 —— 日志却显示「✓ 成功」。
+      所以每次都必须以页面当前所属课程为准。
+    """
+    try:
+        url = getattr(page, "url", "") or ""
+    except Exception:  # noqa: BLE001
+        return ""
+    m = re.search(r"#/(course-v2:[^/]+?)/courseware", url)
+    return m.group(1) if m else ""
+
+
+def mark_seen(page, log, group_id, hdr=None, base=None, course_id=""):
     """给一个叶子打「已看」。成功返回 True。"""
     if hdr is None or base is None:
         hdr, base = load_headers()
     if not hdr or not base:
         log.warning("    缺提交头（先跑 tools/grab_submit_tpl.py），跳过标记已看")
         return False
+    # 课程实例必须以当前页面为准，不能用缓存模板里那本书的
+    cid = course_id or _course_id_from_page(page)
+    cached_cid = str(base.get("courseId") or "")
+    if cid and cid != cached_cid:
+        base = dict(base)
+        base["courseId"] = cid
+        log.debug(f"    标记已看 courseId 校正: {cached_cid[-28:]} → {cid[-28:]}")
     try:
         r = page.evaluate(JS_MARK, [hdr, base, group_id]) or {}
     except Exception as exc:  # noqa: BLE001

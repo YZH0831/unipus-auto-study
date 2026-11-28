@@ -221,6 +221,23 @@ class RunState:
             self._save()
         return n
 
+    def reset_pc_unsupported(self) -> int:
+        """解除全部 unsupported_pc（判成「PC 端做不了」）标记。
+
+        新版本对这类页面会先试「标记已看」；之前被跳过的项需要清掉缓存
+        才会重新打开（--retry-pc）。
+        """
+        n = 0
+        for key, rec in self.data["leaves"].items():
+            if isinstance(rec, dict) and rec.get("status") == "unsupported_pc":
+                rec["status"] = "incomplete"
+                rec["ts"] = time.time()
+                n += 1
+        if n:
+            self.data["updated_at"] = time.time()
+            self._save()
+        return n
+
     def clear(self):
         self.data = {"version": 1, "updated_at": time.time(), "leaves": {}}
         self._save()
